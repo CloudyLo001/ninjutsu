@@ -1,0 +1,131 @@
+// Screens, HUD and the settings panel. All outside #stage, so none of it is
+// mirrored.
+
+import * as settings from './settings.js';
+
+const $ = (id) => document.getElementById(id);
+const RING_CIRCUM = 2 * Math.PI * 52;
+
+export const els = {
+  stage: $('stage'), video: $('cam'), canvas: $('gl'),
+  ringWrap: $('ring-wrap'), ringFill: null, ringLabel: $('ring-label'),
+  state: $('state-label'), debug: $('debug-panel'),
+  screens: { start: $('screen-start'), loading: $('screen-loading'), error: $('screen-error') },
+};
+
+const handlers = {};
+export function on(name, fn) { handlers[name] = fn; }
+
+export function init(thresholds = { lo: 0.42, hi: 0.72 }) {
+  els.ringFill = document.querySelector('.ring-fill');
+  for (const [id, frac] of [['tick-lo', thresholds.lo], ['tick-hi', thresholds.hi]]) {
+    const el = $(id), a = frac * Math.PI * 2;
+    el.setAttribute('x1', 60 + Math.cos(a) * 45); el.setAttribute('y1', 60 + Math.sin(a) * 45);
+    el.setAttribute('x2', 60 + Math.cos(a) * 59); el.setAttribute('y2', 60 + Math.sin(a) * 59);
+  }
+  bindSettings();
+}
+
+export function showScreen(name) {
+  for (const [key, el] of Object.entries(els.screens)) el.hidden = key !== name;
+}
+export function hideScreens() { showScreen(null); }
+
+export function setLoading(frac, msg) {
+  $('load-bar').style.width = `${Math.round(frac * 100)}%`;
+  if (msg) $('load-msg').textContent = msg;
+}
+
+export function showError(title, msg) {
+  $('err-title').textContent = title;
+  $('err-msg').textContent = msg;
+  showScreen('error');
+}
+
+export function setOpenness(v, active) {
+  if (!els.ringFill) return;
+  const c = Math.max(0, Math.min(1, v));
+  els.ringFill.style.strokeDashoffset = String(RING_CIRCUM * (1 - c));
+  els.ringLabel.textContent = `${Math.round(c * 100)}%`;
+  els.ringWrap.classList.toggle('active', !!active);
+}
+
+export function setState(name) {
+  els.state.textContent = name === 'IDLE' ? '' : name;
+  els.state.classList.toggle('on', name !== 'IDLE');
+}
+
+/* ------------------------------------------------------------ jutsu menu */
+
+const meters = {};
+
+/** Position the threshold ticks once; each sign fires at its own level. */
+export function initJutsuMenu(thresholds) {
+  for (const [sign, level] of Object.entries(thresholds)) {
+    const tick = document.querySelector(`[data-tick="${sign}"]`);
+    if (tick) tick.style.left = `${Math.round(level * 100)}%`;
+    meters[sign] = {
+      bar: document.querySelector(`[data-bar="${sign}"]`),
+      row: document.querySelector(`.jutsu[data-sign="${sign}"]`),
+    };
+  }
+}
+
+/** Live score per sign, so you can see which one you are closest to. */
+export function setJutsuScores(scores) {
+  if ($('jutsu-panel').hidden) return;
+  for (const [sign, { value, active }] of Object.entries(scores)) {
+    const m = meters[sign];
+    if (!m) continue;
+    if (m.bar) m.bar.style.width = `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
+    if (m.row) m.row.classList.toggle('on', !!active);
+  }
+}
+
+export function setDebug(lines) {
+  if (!lines) { els.debug.hidden = true; return; }
+  els.debug.hidden = false;
+  els.debug.textContent = lines;
+}
+
+function bindSettings() {
+  const panel = $('settings-panel');
+  const jutsu = $('jutsu-panel');
+
+  $('settings-btn').addEventListener('click', () => {
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) { jutsu.hidden = true; handlers.settingsOpened?.(); }
+  });
+  $('btn-close-settings').addEventListener('click', () => { panel.hidden = true; });
+
+  $('jutsu-btn').addEventListener('click', () => {
+    jutsu.hidden = !jutsu.hidden;
+    if (!jutsu.hidden) panel.hidden = true;
+  });
+  $('btn-close-jutsu').addEventListener('click', () => { jutsu.hidden = true; });
+
+  const s = settings.get();
+  $('opt-size').value = String(s.size);
+  $('opt-debug').checked = s.debug;
+
+  $('opt-size').addEventListener('input', (e) => settings.set({ size: parseFloat(e.target.value) }));
+  $('opt-debug').addEventListener('change', (e) => {
+    settings.set({ debug: e.target.checked });
+    if (!e.target.checked) setDebug(null);
+  });
+  $('opt-device').addEventListener('change', (e) => handlers.deviceChanged?.(e.target.value || null));
+}
+
+export function fillDevices(devices, current) {
+  const sel = $('opt-device');
+  sel.innerHTML = '';
+  const def = document.createElement('option');
+  def.value = ''; def.textContent = 'Default';
+  sel.appendChild(def);
+  devices.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId; o.textContent = d.label || `Camera ${i + 1}`;
+    sel.appendChild(o);
+  });
+  sel.value = current || '';
+}

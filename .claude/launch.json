@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "rasenshuriken",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["serve.py", "8123"],
+      "port": 8123
+    }
+  ]
+}

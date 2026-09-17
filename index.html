@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0d12">
+<meta name="mobile-web-app-capable" content="yes">
+<title>螺旋手裏剣 — Rasenshuriken</title>
+<link rel="stylesheet" href="src/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/",
+    "tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs"
+  }
+}
+</script>
+</head>
+<body>
+
+<!-- ===================================================================
+     #stage carries transform: scaleX(-1).  THAT IS THE ONLY MIRROR IN
+     THE APPLICATION.  Video, canvas and landmarks all live in unmirrored
+     space; the flip happens after compositing so they cannot desync.
+     Anything that must NOT read backwards goes outside #stage.
+     =================================================================== -->
+<div id="stage">
+  <video id="cam" playsinline muted></video>
+  <canvas id="gl"></canvas>
+</div>
+
+<div id="hud">
+  <div id="ring-wrap" aria-hidden="true">
+    <svg id="ring" viewBox="0 0 120 120">
+      <circle class="ring-bg"   cx="60" cy="60" r="52"></circle>
+      <circle class="ring-fill" cx="60" cy="60" r="52"></circle>
+      <line class="ring-tick" id="tick-lo"></line>
+      <line class="ring-tick" id="tick-hi"></line>
+    </svg>
+    <div id="ring-label">—</div>
+  </div>
+  <div id="state-label"></div>
+  <div id="debug-panel" hidden></div>
+</div>
+
+<button id="jutsu-btn" title="Hand signs" aria-label="Hand signs">?</button>
+<button id="settings-btn" title="Settings" aria-label="Settings">⚙</button>
+
+<aside id="jutsu-panel" hidden>
+  <h2>Hand signs</h2>
+
+  <div class="jutsu" data-sign="paper">
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <g fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="20" y="33" width="24" height="20" rx="7"/>
+        <path d="M25 33 L19 13"/>
+        <path d="M31 33 L29 9"/>
+        <path d="M37 33 L40 10"/>
+        <path d="M42 34 L49 16"/>
+        <path d="M20 43 L7 36"/>
+      </g>
+    </svg>
+    <div class="jutsu-text">
+      <b>Paper <span>開</span></b>
+      <p>One hand open flat, fingers spread.</p>
+      <em>Rasenshuriken on your palm</em>
+    </div>
+    <div class="jutsu-meter"><i data-bar="paper"></i><u data-tick="paper"></u></div>
+  </div>
+
+  <div class="jutsu" data-sign="cross">
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <g fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="42" width="15" height="15" rx="5"/>
+        <rect x="45" y="42" width="15" height="15" rx="5"/>
+        <path d="M16 44 L46 12"/>
+        <path d="M11 41 L41 9"/>
+        <path d="M48 44 L18 12"/>
+        <path d="M53 41 L23 9"/>
+      </g>
+    </svg>
+    <div class="jutsu-text">
+      <b>Cross <span>交</span></b>
+      <p>Index and middle out on both hands, fingers crossing <b>partway down</b>.</p>
+      <em>Two shadow clones beside you</em>
+    </div>
+    <div class="jutsu-meter"><i data-bar="cross"></i><u data-tick="cross"></u></div>
+  </div>
+
+  <div class="jutsu" data-sign="ram">
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <g fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="6" y="43" width="15" height="15" rx="5"/>
+        <rect x="43" y="43" width="15" height="15" rx="5"/>
+        <path d="M18 43 L31 11"/>
+        <path d="M12 44 L28 12"/>
+        <path d="M46 43 L33 11"/>
+        <path d="M52 44 L36 12"/>
+        <circle cx="32" cy="9" r="2.6" fill="currentColor" stroke="none"/>
+      </g>
+    </svg>
+    <div class="jutsu-text">
+      <b>Ram <span>未</span></b>
+      <p>Same fingers, angled into a steeple — <b>fingertips touching</b>.</p>
+      <em>Log substitution, you vanish 5s</em>
+    </div>
+    <div class="jutsu-meter"><i data-bar="ram"></i><u data-tick="ram"></u></div>
+  </div>
+
+  <p class="hint">
+    Cross and ram use the same fingers. The difference is <b>where they meet</b>:
+    crossed partway down, or touching at the tips.
+  </p>
+  <div class="row buttons"><button id="btn-close-jutsu">Close</button></div>
+</aside>
+
+<aside id="settings-panel" hidden>
+  <h2>Settings</h2>
+  <label class="row">
+    <span>Size</span>
+    <input id="opt-size" type="range" min="0.6" max="1.8" step="0.05">
+  </label>
+  <label class="row">
+    <span>Camera</span>
+    <select id="opt-device"></select>
+  </label>
+  <label class="row">
+    <span>Debug overlay</span>
+    <input id="opt-debug" type="checkbox">
+  </label>
+  <div class="row buttons">
+    <button id="btn-close-settings">Close</button>
+  </div>
+</aside>
+
+<div id="overlays">
+
+  <section id="screen-start" class="screen">
+    <h1>螺旋手裏剣</h1>
+    <h2>Rasenshuriken</h2>
+    <p>
+      <strong>Open one hand flat</strong> — the paper sign — and a Rasenshuriken forms
+      on your palm. Tilt your hand to angle it.<br>
+      <strong>Cross two fingers on both hands</strong> and two shadow clones appear
+      beside you. Release and they go up in smoke.<br>
+      <strong>Ram seal</strong> — same two fingers, angled into a steeple with the
+      fingertips touching — swaps you for a log and you vanish for five seconds.
+    </p>
+    <div class="row buttons">
+      <button id="btn-begin" class="primary">Enable camera &amp; begin</button>
+    </div>
+    <p class="fine">Nothing is recorded, uploaded, or saved. Everything runs in this browser tab.<br>On a phone, hold it steady or prop it up — you need both hands free.</p>
+  </section>
+
+  <section id="screen-loading" class="screen" hidden>
+    <h2>Loading</h2>
+    <div class="bar"><div id="load-bar"></div></div>
+    <p id="load-msg">Starting…</p>
+    <p class="fine">First run downloads ~20&nbsp;MB of the hand model. It is cached afterwards.</p>
+  </section>
+
+  <section id="screen-error" class="screen" hidden>
+    <h2 id="err-title">Something went wrong</h2>
+    <p id="err-msg"></p>
+    <div class="row buttons"><button id="btn-retry" class="primary">Try again</button></div>
+  </section>
+
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
