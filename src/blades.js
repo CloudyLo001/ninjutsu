@@ -27,6 +27,7 @@ void main() {
 const ENERGY_FRAG = /* glsl */`
 precision highp float;
 uniform float uOpacity;
+uniform float uWhite;      // 0..1, how hard the blades burn toward white
 uniform vec3 uCore;
 uniform vec3 uEdge;
 varying vec3 vN; varying vec3 vV;
@@ -34,23 +35,37 @@ void main() {
   float facing = abs(dot(normalize(vN), normalize(vV)));
   float fres = pow(1.0 - facing, 1.15);
   vec3 col = mix(uCore, uEdge, fres);
+  // Weighted toward the silhouette, where the fresnel already peaks: that edge
+  // is what the eye tracks on a shape spinning this fast, and it is what the
+  // bloom pass then spreads outward as a white haze around the blades.
+  col = mix(col, vec3(1.0), clamp(uWhite * (0.25 + 0.75 * fres), 0.0, 1.0));
   float a = (0.34 + 0.66 * fres) * uOpacity;
   if (a < 0.004) discard;
-  gl_FragColor = vec4(col * a, a);   // premultiplied, for additive blending
+  // The extra luminance rides on the COLOUR, not the alpha, so the blades get
+  // hotter and bloom harder without becoming more solid and hiding each other.
+  gl_FragColor = vec4(col * a * (1.0 + uWhite * 0.6), a);   // premultiplied, additive
 }`;
 
-function makeEnergyMaterial(opacity = 1, core = 0x3f9dff, edge = 0xeafaff) {
+// White, not blue. The ball is the blue light source; the blades are the
+// white chakra thrown off it, which is also how the reference reads -- a
+// bright blue core inside a white pinwheel.
+function makeEnergyMaterial(opacity = 1, core = 0xd2e8ff, edge = 0xffffff) {
   return new THREE.ShaderMaterial({
     vertexShader: ENERGY_VERT,
     fragmentShader: ENERGY_FRAG,
     uniforms: {
       uOpacity: { value: opacity },
+      uWhite: { value: 0.6 },
       uCore: { value: new THREE.Color(core) },
       uEdge: { value: new THREE.Color(edge) },
     },
     blending: THREE.AdditiveBlending,
     transparent: true,
     depthWrite: false,
+    // Depth-tested, so the hand-depth proxy (handproxy.js) can hide the blades
+    // too: with the back of the hand toward the camera the whole Rasengan sits
+    // behind it, and only the blade tips past the hand's outline should show.
+    depthTest: true,
     // Front faces only. This mesh is volumetric (roughly half as deep as it is
     // wide), so with DoubleSide every ray sums a front and a back surface and
     // the blades merge into a featureless blob. One surface per ray keeps the
@@ -67,7 +82,7 @@ void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(
 
 const FRAG = /* glsl */`
 precision highp float;
-uniform float uAngle, uBlur, uExtend, uEnergy, uGain;
+uniform float uAngle, uBlur, uExtend, uEnergy, uGain, uWhite;
 varying vec2 vUv;
 const float PI = 3.14159265;
 const float BLADES = 5.0;
@@ -104,9 +119,10 @@ void main() {
   ink += smoothstep(reach, 0.0, r) * 0.03;
 
   vec3 col = mix(vec3(0.60, 0.84, 1.0), vec3(0.97, 1.0, 1.0), ink);
+  col = mix(col, vec3(1.0), clamp(uWhite * 0.65, 0.0, 1.0));
   float alpha = ink * uGain * uEnergy;
   if (alpha < 0.004) discard;
-  gl_FragColor = vec4(col * alpha, alpha);
+  gl_FragColor = vec4(col * alpha * (1.0 + uWhite * 0.6), alpha);
 }`;
 
 export class ShaderBlades {
@@ -114,7 +130,7 @@ export class ShaderBlades {
     this.kind = 'shader';
     this.uniforms = {
       uAngle: { value: 0 }, uBlur: { value: 0 }, uExtend: { value: 0 },
-      uEnergy: { value: 0 }, uGain: { value: 1.25 },
+      uEnergy: { value: 0 }, uGain: { value: 1.25 }, uWhite: { value: 0.6 },
     };
     this.object3d = new THREE.Mesh(
       new THREE.PlaneGeometry(radius * 2, radius * 2),
@@ -132,6 +148,7 @@ export class ShaderBlades {
   setSpin(a) { this.uniforms.uAngle.value = a; }
   setBlur(b) { this.uniforms.uBlur.value = b; }
   setGain(g) { this.uniforms.uGain.value = g; }
+  setWhite(w) { this.uniforms.uWhite.value = w; }
 
   dispose() {
     this.object3d.geometry.dispose();
@@ -281,6 +298,10 @@ export class GlbBlades {
 
   setBlur(b) { this._blur = b; }
   setGain(g) { this._gain = g; this._applyGain(); }
+
+  setWhite(w) {
+    for (const m of this._mats) m.uniforms.uWhite.value = w;
+  }
 
   dispose() {
     this.object3d.traverse((n) => { if (n.isMesh) n.geometry?.dispose?.(); });

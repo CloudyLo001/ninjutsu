@@ -24,6 +24,26 @@ export function init(thresholds = { lo: 0.42, hi: 0.72 }) {
     el.setAttribute('x2', 60 + Math.cos(a) * 59); el.setAttribute('y2', 60 + Math.sin(a) * 59);
   }
   bindSettings();
+  bindSignArt();
+}
+
+/**
+ * The cross and ram rows show reference photographs. If one is missing the row
+ * would otherwise be an empty box, so the drawn glyph it replaced is kept in
+ * the markup and revealed on a load error.
+ */
+function bindSignArt() {
+  for (const img of document.querySelectorAll('[data-sign-img]')) {
+    const fail = () => {
+      img.hidden = true;
+      img.parentElement?.querySelector('[data-sign-fallback]')?.removeAttribute('hidden');
+    };
+    // Images start loading while the document parses, and this module runs
+    // afterwards -- so a missing file has already failed by now and no error
+    // event is coming. A finished image with no intrinsic width is a failed one.
+    if (img.complete && img.naturalWidth === 0) fail();
+    else img.addEventListener('error', fail, { once: true });
+  }
 }
 
 export function showScreen(name) {
@@ -39,7 +59,29 @@ export function setLoading(frac, msg) {
 export function showError(title, msg) {
   $('err-title').textContent = title;
   $('err-msg').textContent = msg;
+  $('err-devices').hidden = true;
   showScreen('error');
+}
+
+/**
+ * Offer a camera chooser on the error screen.
+ *
+ * A failed open is exactly when you most need the device list, and it is the
+ * one moment the settings panel is unreachable. Labels only exist once camera
+ * permission has been granted at least once, so this stays hidden after a
+ * permission denial, where it could only show "Camera 1 / Camera 2" anyway.
+ */
+export function offerDevices(devices, current) {
+  const sel = $('err-device');
+  if (!devices || devices.length < 2 || !devices.some((d) => d.label)) return;
+  sel.innerHTML = '';
+  devices.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId; o.textContent = d.label || `Camera ${i + 1}`;
+    sel.appendChild(o);
+  });
+  sel.value = current || devices[0].deviceId;
+  $('err-devices').hidden = false;
 }
 
 export function setOpenness(v, active) {
@@ -107,13 +149,16 @@ function bindSettings() {
   const s = settings.get();
   $('opt-size').value = String(s.size);
   $('opt-debug').checked = s.debug;
+  $('opt-hand').value = s.rasenganHand;
 
   $('opt-size').addEventListener('input', (e) => settings.set({ size: parseFloat(e.target.value) }));
+  $('opt-hand').addEventListener('change', (e) => settings.set({ rasenganHand: e.target.value }));
   $('opt-debug').addEventListener('change', (e) => {
     settings.set({ debug: e.target.checked });
     if (!e.target.checked) setDebug(null);
   });
   $('opt-device').addEventListener('change', (e) => handlers.deviceChanged?.(e.target.value || null));
+  $('btn-use-device').addEventListener('click', () => handlers.devicePicked?.($('err-device').value));
 }
 
 export function fillDevices(devices, current) {

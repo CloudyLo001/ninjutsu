@@ -277,11 +277,17 @@ export class SignTrigger {
 
 /**
  * Picks the most open hand, for the paper sign.
+ *
+ * @param {Function} [allow] optional predicate on the hand index, used to
+ *   restrict the sign to one physical hand. A rejected hand is not merely
+ *   scored lower, it is skipped -- so holding the wrong hand open cannot
+ *   produce a partial score that creeps toward the trigger.
  * @returns {{score:number, handIndex:number}}
  */
-export function bestOpenHand(worldHands) {
+export function bestOpenHand(worldHands, allow) {
   let best = 0, idx = -1;
   (worldHands || []).forEach((h, i) => {
+    if (allow && !allow(i)) return;
     const o = openness(h);
     if (o > best) { best = o; idx = i; }
   });

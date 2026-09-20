@@ -269,13 +269,38 @@ input[type=range] { cursor: pointer; }
 }
 .jutsu:first-of-type { border-top: 0; padding-top: 2px; }
 
-.jutsu svg {
+/* One cell holding either a reference photo or the drawn glyph. */
+.sign-art {
   grid-row: 1 / 3;
   width: 52px; height: 52px;
+  display: grid; place-items: center;
+}
+
+.jutsu svg {
+  width: 100%; height: 100%;
   color: #9fb6d4;
   transition: color .2s, filter .2s;
 }
 .jutsu.on svg { color: var(--chakra); filter: drop-shadow(0 0 7px rgba(79,195,255,.65)); }
+
+/* The cross and ram references are scans and screen grabs, not icons: one is
+   black ink on white, the other a dark frame. Desaturating both makes them sit
+   quietly next to the drawn paper glyph instead of fighting it, and letting the
+   colour back in on match doubles as the "you are doing it" cue. */
+.jutsu img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid rgba(255,255,255,.15);
+  background: #0d1119;
+  filter: grayscale(1) contrast(1.12) brightness(1.04);
+  transition: filter .2s, border-color .2s, box-shadow .2s;
+}
+.jutsu.on img {
+  filter: none;
+  border-color: var(--chakra);
+  box-shadow: 0 0 8px rgba(79,195,255,.5);
+}
 
 .jutsu-text b {
   display: block;
@@ -355,7 +380,7 @@ input[type=range] { cursor: pointer; }
   .screen p { font-size: 13px; }
 
   .jutsu { grid-template-columns: 44px 1fr; column-gap: 11px; }
-  .jutsu svg { width: 44px; height: 44px; }
+  .sign-art { width: 44px; height: 44px; }
   .jutsu-text p, .jutsu-text em { font-size: 11px; }
 }
 

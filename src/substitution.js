@@ -12,6 +12,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ASSETS } from './assets.js';
+import { PROFILE } from './device.js';
 
 const LOG_URL = ASSETS.substitutionLog;
 
@@ -24,11 +25,27 @@ const T_END     = 5.00;
 
 const LOG_DEPTH_CM = 95;  // roughly body distance; hands sit much closer
 
+// How long the burst lasts. Outlives the log's flight (T_LOG_OUT) on purpose,
+// so the gas is still clearing as the log drops away rather than the two
+// finishing together and the frame going abruptly empty.
+const SMOKE_SPAN = 1.6;
+
 /* -------------------------------------------------------------- shaders */
 
 const VERT = /* glsl */`
 varying vec2 vUv;
 void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+
+// The vanish quad covers only the player, not the whole screen, so it needs
+// its own vertex shader -- the shared VERT above ignores the model matrix
+// entirely, which means scaling the mesh would do nothing at all.
+const RECT_VERT = /* glsl */`
+uniform vec4 uRect;          // x0, y0, w, h in screen uv
+varying vec2 vScreenUv;
+void main() {
+  vScreenUv = uRect.xy + uv * uRect.zw;
+  gl_Position = vec4(vScreenUv * 2.0 - 1.0, 0.0, 1.0);
+}`;
 
 // Paints the background plate over the person.
 const VANISH_FRAG = /* glsl */`
@@ -38,34 +55,70 @@ uniform sampler2D uMask;
 uniform float uAmount;       // 0 = visible, 1 = gone
 uniform float uMaskFlipY;
 uniform float uPlateFlipY;
-varying vec2 vUv;
+uniform float uAspect;       // frame w/h, to keep the dilation round in pixels
+varying vec2 vScreenUv;
 
 void main() {
-  vec2 muv = vec2(vUv.x, mix(vUv.y, 1.0 - vUv.y, uMaskFlipY));
+  vec2 uv = vScreenUv;
+  vec2 muv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, uMaskFlipY));
 
   // Dilate and soften the mask a little. A hard silhouette edge reads as a
   // cut-out; a soft one reads as the person not being there.
+  //
+  // 3x3 at a wide step rather than 5x5 at a narrow one: the mask is a low-res
+  // texture being magnified several times over, so there is no detail in there
+  // for the extra sixteen taps to find.
   float m = 0.0;
-  for (int i = -2; i <= 2; i++) {
-    for (int j = -2; j <= 2; j++) {
-      m += texture2D(uMask, muv + vec2(float(i), float(j)) * 0.006).r;
+  vec2 spread = vec2(0.010, 0.010 * uAspect);
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      m += texture2D(uMask, muv + vec2(float(i), float(j)) * spread).r;
     }
   }
-  m /= 25.0;
+  m /= 9.0;
   float a = smoothstep(0.18, 0.62, m) * uAmount;
   if (a < 0.01) discard;
 
-  vec2 puv = vec2(vUv.x, mix(vUv.y, 1.0 - vUv.y, uPlateFlipY));
-  gl_FragColor = vec4(texture2D(uPlate, puv).rgb, a);
+  vec2 puv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, uPlateFlipY));
+  vec4 sharp = texture2D(uPlate, puv);
+  float conf = sharp.a;        // how many samples this pixel's mean is made of
+
+  // Where we do not know what is behind them, do not say it sharply. Blurring
+  // does not make the pixel any less wrong -- it makes it wrong in the register
+  // the eye forgives: low-frequency wrongness reads as soft light, while
+  // high-frequency wrongness reads as a smear of the very person we were
+  // supposed to have removed.
+  //
+  // Note what this deliberately does NOT do: drop the alpha where confidence is
+  // low. That would leave the player partly visible exactly where the plate is
+  // worst, turning "wrong background" into "visible player" -- the one failure
+  // the whole effect cannot survive.
+  vec2 ring = vec2(0.022, 0.022 * uAspect);
+  vec3 wide = texture2D(uPlate, puv + vec2( ring.x, 0.0)).rgb
+            + texture2D(uPlate, puv + vec2(-ring.x, 0.0)).rgb
+            + texture2D(uPlate, puv + vec2(0.0,  ring.y)).rgb
+            + texture2D(uPlate, puv + vec2(0.0, -ring.y)).rgb;
+  vec3 col = mix(wide * 0.25, sharp.rgb, smoothstep(0.15, 0.55, conf));
+
+  gl_FragColor = vec4(col, a);
 }`;
 
-const SMOKE_FRAG = /* glsl */`
+// The burst. Several puffs rather than one, because a single expanding blob
+// reads as a circle wiping outward -- what makes smoke look like smoke is
+// separate lobes billowing at slightly different sizes, times and rates.
+//
+// Built per device: the lobe count has to be a compile-time constant for the
+// loop, and it is the one knob that decides how expensive this shader is.
+const SMOKE_FRAG = (lobes) => /* glsl */`
 precision highp float;
 uniform float uT;
 uniform vec2  uCenter;
 uniform float uAspect;
 uniform float uSize;
+uniform float uSeed;     // varies the burst so two substitutions differ
 varying vec2 vUv;
+
+const int LOBES = ${lobes};
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
@@ -74,28 +127,54 @@ float noise(vec2 p) {
   return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
              mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
+// Three octaves, not four: this now runs twice per LOBE rather than twice per
+// pixel, so the octave count is multiplied by however many puffs there are.
 float fbm(vec2 p) {
   float v = 0.0, a = 0.5;
-  for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.05; a *= 0.5; }
+  for (int i = 0; i < 3; i++) { v += a * noise(p); p *= 2.05; a *= 0.5; }
   return v;
 }
 
-void main() {
-  vec2 d = (vUv - uCenter) * vec2(uAspect, 1.0);
-  float grow = 0.45 + 0.85 * pow(uT, 0.5);
-  d.y -= 0.12 * uT * uSize;
-  float r = length(d) / (uSize * grow);
-  if (r > 1.3) discard;
-
+/** One billowing puff, 0..1 coverage. */
+float puff(vec2 d, float t, float size, float seed) {
+  if (t <= 0.0 || t >= 1.0) return 0.0;
+  float grow = 0.34 + 0.95 * pow(t, 0.5);
+  d.y -= 0.26 * t * size;                    // gas rises as it expands
+  float r = length(d) / max(size * grow, 1e-4);
+  if (r > 1.3) return 0.0;
   float ang = atan(d.y, d.x);
-  float edge = 0.62 + 0.46 * fbm(vec2(cos(ang), sin(ang)) * 3.2 + uT * 1.5);
-  float body = smoothstep(edge, edge * 0.35, r);
-  body *= 0.55 + 0.80 * fbm(d * 7.0 / uSize + uT * 2.0);
+  float edge = 0.60 + 0.46 * fbm(vec2(cos(ang), sin(ang)) * 3.2 + seed + t * 1.3);
+  float body = smoothstep(edge, edge * 0.32, r);
+  body *= 0.50 + 0.85 * fbm(d * 6.5 / max(size, 1e-4) + seed * 3.1 + t * 1.7);
+  float life = (1.0 - smoothstep(0.52, 1.0, t)) * smoothstep(0.0, 0.07, t);
+  return clamp(body, 0.0, 1.0) * life;
+}
 
-  float life = (1.0 - smoothstep(0.50, 1.0, uT)) * smoothstep(0.0, 0.07, uT);
-  float a = clamp(body, 0.0, 1.0) * life;
+void main() {
+  vec2 d0 = (vUv - uCenter) * vec2(uAspect, 1.0);
+  // The cluster can never reach past this, and the quad is fullscreen, so one
+  // cheap test discards most of the screen before any noise is evaluated.
+  if (length(d0) > uSize * 3.2) discard;
+
+  float cover = 0.0;
+  for (int i = 0; i < LOBES; i++) {
+    float fi = float(i);
+    float h = hash(vec2(fi, uSeed));
+    float ang = fi * 2.39996 + uSeed * 6.283;   // golden angle: even spread, no clumping
+    vec2 off = vec2(cos(ang), sin(ang) * 0.8) * (0.15 + 0.62 * h) * uSize;
+    float delay = fi * 0.055;                   // they burst outward in sequence
+    float t = clamp((uT - delay) / max(1.0 - delay, 0.25), 0.0, 1.0);
+    // MAX, not a sum: overlapping lobes must not stack into a solid white slab
+    cover = max(cover, puff(d0 - off, t, uSize * (0.42 + 0.48 * h), h * 9.0));
+  }
+
+  // A wide, faint haze on a slower clock, so gas is still hanging in the air
+  // after the burst itself has torn apart.
+  float haze = puff(d0, clamp(uT * 0.62, 0.0, 1.0), uSize * 1.5, uSeed * 4.0) * 0.45;
+
+  float a = clamp(max(cover, haze), 0.0, 1.0);
   if (a < 0.006) discard;
-  gl_FragColor = vec4(mix(vec3(0.74, 0.76, 0.80), vec3(1.0), body * 0.8), a);
+  gl_FragColor = vec4(mix(vec3(0.74, 0.76, 0.80), vec3(1.0), cover * 0.8), a);
 }`;
 
 /* ------------------------------------------------------------ the jutsu */
@@ -121,9 +200,11 @@ export class Substitution {
       // Render targets do not carry the flipY that a VideoTexture does, so the
       // plate comes back the right way up and must NOT be flipped again.
       uPlateFlipY: { value: 0 },
+      uAspect: { value: 1.7 },
+      uRect: { value: new THREE.Vector4(0, 0, 1, 1) },
     };
     this.vanish = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
-      vertexShader: VERT, fragmentShader: VANISH_FRAG, uniforms: this.vanishU,
+      vertexShader: RECT_VERT, fragmentShader: VANISH_FRAG, uniforms: this.vanishU,
       transparent: true, depthTest: false, depthWrite: false,
     }));
     this.vanish.renderOrder = -1;
@@ -132,10 +213,10 @@ export class Substitution {
 
     this.smokeU = {
       uT: { value: 0 }, uCenter: { value: new THREE.Vector2(0.5, 0.5) },
-      uAspect: { value: 1.7 }, uSize: { value: 0.26 },
+      uAspect: { value: 1.7 }, uSize: { value: 0.26 }, uSeed: { value: 0 },
     };
     this.smoke = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
-      vertexShader: VERT, fragmentShader: SMOKE_FRAG, uniforms: this.smokeU,
+      vertexShader: VERT, fragmentShader: SMOKE_FRAG(PROFILE.smokeLobes), uniforms: this.smokeU,
       transparent: true, depthTest: false, depthWrite: false,
     }));
     this.smoke.renderOrder = 5;     // over the clones and the vanish quad
@@ -186,7 +267,40 @@ export class Substitution {
   }
 
   setMaskTexture(tex) { this.vanishU.uMask.value = tex; }
-  setPersonBounds(b) { if (b) this.bounds = b; }
+
+  setPersonBounds(b) {
+    if (!b) return;
+    this.bounds = b;
+    // Keep the painted region around a player who walks off mid-jutsu.
+    if (this.state !== 'IDLE') this._fitRect(b, true);
+  }
+
+  /**
+   * Point the vanish quad at the player instead of the whole screen.
+   *
+   * It used to be fullscreen, running its mask kernel on every pixel of the
+   * canvas every frame of the five seconds -- on a phone that is billions of
+   * texture fetches a second spent almost entirely on pixels that discard.
+   *
+   * `grow` makes it expand but never shrink while the jutsu runs: the mask
+   * keeps tracking a player who moves, and a rect that followed them inward
+   * would clip the painted region into a hard-edged rectangle.
+   */
+  _fitRect(b, grow) {
+    const M = 0.14;                      // margin, wide enough for the soft edge
+    // bounds y is measured top-down off the mask; screen uv runs bottom-up.
+    const cy = 1 - b.cy;
+    let x0 = b.cx - b.w / 2 - M, x1 = b.cx + b.w / 2 + M;
+    let y0 = cy - b.h / 2 - M, y1 = cy + b.h / 2 + M;
+    if (grow) {
+      const r = this.vanishU.uRect.value;
+      x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + r.z); y1 = Math.max(y1, r.y + r.w);
+    }
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+    x1 = Math.min(1, x1); y1 = Math.min(1, y1);
+    this.vanishU.uRect.value.set(x0, y0, x1 - x0, y1 - y0);
+  }
 
   get active() { return this.state !== 'IDLE'; }
   /** True while the player should be treated as absent. */
@@ -198,7 +312,9 @@ export class Substitution {
     this.t = 0;
     const b = this.bounds || { cx: 0.5, cy: 0.55, w: 0.4, h: 0.8 };
     this.smokeU.uCenter.value.set(b.cx, 1 - b.cy);
-    this.smokeU.uSize.value = THREE.MathUtils.clamp(b.h * 0.42, 0.18, 0.42);
+    this.smokeU.uSize.value = THREE.MathUtils.clamp(b.h * 0.52, 0.22, 0.52);
+    this.smokeU.uSeed.value = Math.random();
+    this._fitRect(b, false);
     this._placeLog(b);
     return true;
   }
@@ -239,10 +355,12 @@ export class Substitution {
     this.vanish.visible = hide > 0.01 && !!this.vanishU.uMask.value;
 
     // --- smoke burst
-    const st = t / 0.85;
+    const st = t / SMOKE_SPAN;
     this.smokeU.uT.value = Math.min(1, st);
     this.smoke.visible = st < 1;
-    this.smokeU.uAspect.value = this.stage.width / Math.max(1, this.stage.height);
+    const aspect = this.stage.width / Math.max(1, this.stage.height);
+    this.smokeU.uAspect.value = aspect;
+    this.vanishU.uAspect.value = aspect;
 
     // --- the log: launches out of the burst, arcs up, drops below frame
     if (this.logReady && t >= T_LOG_IN && t < T_LOG_OUT) {

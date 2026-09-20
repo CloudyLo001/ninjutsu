@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { PROFILE } from './device.js';
+import { Bloom } from './bloom.js';
 
 // MediaPipe's face-geometry frustum; kept so palm depth estimates and the
 // render agree on one projection.
@@ -25,11 +26,25 @@ uniform vec3  uGlowColor;
 uniform vec2  uRes;
 uniform float uFlash;
 uniform float uDarken;   // how hard the effect stops down its surroundings
+uniform sampler2D uEffectTex;   // the blurred effect-only pass, from bloom.js
+uniform float uEffectAmt;       // 0 when there is no effect to key against
+uniform sampler2D uDebugTex;
+uniform float uDebugMode;   // 0 off, 1 plate colour, 2 plate confidence
 varying vec2 vUv;
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
 void main() {
+  // Dev view. The background plate is never drawn on its own anywhere else, so
+  // without this there is no way to see whether it has learned the room or
+  // what it thinks it knows -- and the confidence channel is invisible by
+  // construction.
+  if (uDebugMode > 0.5) {
+    vec4 plate = texture2D(uDebugTex, vUv);
+    gl_FragColor = vec4(uDebugMode > 1.5 ? vec3(plate.a) : plate.rgb, 1.0);
+    return;
+  }
+
   vec2 uv = vUv;
   vec3 col = texture2D(uTex, uv).rgb;
   float l = luma(col);
@@ -39,12 +54,21 @@ void main() {
   float aspect = uRes.x / uRes.y;
   vec2 d = (uv - uGlowPos) * vec2(aspect, 1.0);
   float r = length(d) / max(uGlowRadius, 0.001);
-  // The effect is additive, so on a bright background (skin, a white wall) it
-  // just saturates to white and the blade shapes vanish. Pulling the
-  // surroundings down first gives it something to stand against -- and reads
-  // naturally, like the camera stopping down against a very bright source.
-  float falloff = exp(-r * r * 1.5);
-  col *= 1.0 - uGlow * falloff * uDarken;
+
+  // The effect is additive, so on a bright background -- skin, a pale wall --
+  // it saturates to white and the blade shapes vanish. Something has to be
+  // pulled down to give it contrast.
+  //
+  // Keyed to where the effect ACTUALLY IS, using the blurred effect-only pass
+  // the bloom already renders, rather than to a radial falloff around it. The
+  // radial version rings the whole effect in a dark halo that is plainly
+  // visible in empty space; this version hides underneath the blades, exactly
+  // where it buys them their contrast, and does not exist anywhere else.
+  if (uEffectAmt > 0.0) {
+    vec3 e = texture2D(uEffectTex, uv).rgb;
+    float cover = clamp(max(max(e.r, e.g), e.b) * 1.7, 0.0, 1.0);
+    col *= 1.0 - uDarken * cover * uEffectAmt;
+  }
 
   // a light, not a fill: weighted toward the darker pixels so what it hits
   // glows rather than clipping
@@ -74,10 +98,14 @@ export class Stage {
       uGlowPos: { value: new THREE.Vector2(0.5, 0.5) },
       uGlow: { value: 0 },
       uGlowRadius: { value: 0.45 },
-      uGlowColor: { value: new THREE.Color(0x3fa9ff) },
+      uGlowColor: { value: new THREE.Color(0x2f8dff) },   // the ball is the light source, so blue
       uRes: { value: new THREE.Vector2(1, 1) },
       uFlash: { value: 0 },
-      uDarken: { value: 0.88 },
+      uDarken: { value: 0.72 },
+      uEffectTex: { value: null },
+      uEffectAmt: { value: 0 },
+      uDebugTex: { value: null },
+      uDebugMode: { value: 0 },
     };
     this.bgScene = new THREE.Scene();
     this.bgCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -96,6 +124,11 @@ export class Stage {
     this.scene = new THREE.Scene();
     // Origin, default orientation, never moved. Aspect is set in layout().
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 2, 800);
+
+    // The glow that actually reads as light: a blurred copy of the effect,
+    // added back over the finished frame. See bloom.js for why sprites alone
+    // cannot get there.
+    this.bloom = new Bloom(this.renderer, PROFILE.bloomLevels, PROFILE.bloomDownscale);
 
     this.shake = 0;
     this._shakeSeed = Math.random() * 1000;
@@ -120,6 +153,7 @@ export class Stage {
     this.camera.updateProjectionMatrix();
     this.width = w; this.height = h;
     this.bgUniforms.uRes.value.set(w, h);
+    this.bloom.resize(w, h);
     return true;
   }
 
@@ -138,10 +172,24 @@ export class Stage {
   render(nowMs) {
     this._applyShake(nowMs);
     const r = this.renderer;
+
+    // Built first, from the effect alone. Blooming the composited frame would
+    // drag the webcam image's own highlights -- a lamp, a window -- into the
+    // glow along with it.
+    const bloomed = this.bloom.build(this.scene, this.camera);
+    // Reused as the darkening key in the video pass below -- the blurred level
+    // rather than the sharp capture, so the contrast it buys extends a little
+    // past the blades instead of stopping dead at their edge.
+    this.bgUniforms.uEffectTex.value = bloomed ? this.bloom.levels[0].a.texture : null;
+    this.bgUniforms.uEffectAmt.value = bloomed ? 1 : 0;
+
+    r.setRenderTarget(null);
     r.clear();
     r.render(this.bgScene, this.bgCamera);
     r.render(this.cloneScene, this.bgCamera);
     r.clearDepth();
     r.render(this.scene, this.camera);
+
+    if (bloomed) this.bloom.composite();
   }
 }

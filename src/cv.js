@@ -90,12 +90,22 @@ export class CV {
   async _recover() {
     if (this._recovering) return;
     this._recovering = true;
+    // Captured BEFORE nulling. init() only rebuilds the hand task, and
+    // ensureSegmenter is called exactly once at boot -- so without this the
+    // segmenter stays dead for the rest of the session: the mask freezes, the
+    // caller early-returns on the unchanged version, and the background plate
+    // silently stops learning. Invisibility just quietly stops working.
+    const hadSegmenter = !!this.segmenter;
     try {
       try { this.hands?.close(); } catch { /* already dead */ }
       try { this.segmenter?.close(); } catch { /* already dead */ }
       this.segmenter = null;
+      this.hands = null;
       this.lastTs = -1;
       await this.init(() => {});
+      if (hadSegmenter) await this.ensureSegmenter();
+    } catch (err) {
+      console.warn('[cv] recovery failed; retrying on the next frame', err);
     } finally {
       this._recovering = false;
     }
@@ -130,7 +140,11 @@ export class CV {
   stop() { this.running = false; this.onFrame = null; }
 
   _tick(video) {
-    if (this._recovering || !this._resizeSmall(video)) return;
+    if (this._recovering) return;
+    // A recovery that failed (offline, say) leaves the tasks null. Try again
+    // rather than going quiet forever; _recovering keeps it to one at a time.
+    if (!this.hands) { this._recover(); return; }
+    if (!this._resizeSmall(video)) return;
     this.smallCtx.drawImage(video, 0, 0, this.small.width, this.small.height);
 
     let res = null;
@@ -173,6 +187,29 @@ export class CV {
       width: this.small.width, height: this.small.height,
     });
   }
+}
+
+/** MediaPipe's own handedness label per hand: 'Left', 'Right' or ''. */
+export function handLabels(res) {
+  const cats = res?.handedness ?? res?.handednesses ?? [];
+  return cats.map((c) => c?.[0]?.categoryName ?? c?.[0]?.displayName ?? '');
+}
+
+/**
+ * Which of the player's ACTUAL hands each detection belongs to.
+ *
+ * MediaPipe's documentation says handedness assumes a mirrored (selfie) input
+ * and should be swapped otherwise; we feed it the raw frame. Checked against a
+ * real hand, though, the label already matches the physical hand with NO swap
+ * -- the first version of this swapped, and it lit the Rasengan on the
+ * player's left. The mock frame agrees: its right-hand-side hand (raw image
+ * x ~0.29, which a camera sees a person's RIGHT hand at) is labelled Right.
+ *
+ * @returns {Array<'left'|'right'|'unknown'>} parallel to landmarks
+ */
+export function handSides(res) {
+  return handLabels(res).map((name) =>
+    name === 'Left' ? 'left' : name === 'Right' ? 'right' : 'unknown');
 }
 
 /* ------------------------------------------------------------ camera open */
@@ -243,6 +280,40 @@ export function cameraErrorMessage(err) {
     default:
       return `Could not start the camera (${err?.name || 'unknown error'}: ${err?.message || ''}).`;
   }
+}
+
+// Virtual cameras register themselves as ordinary devices and are frequently
+// the system default, but when their host app is not running they either fail
+// to open or hand back a placeholder card. Worth deprioritising, never worth
+// hiding -- someone may well be deliberately feeding us OBS.
+const VIRTUAL_CAM = /virtual|obs|snap camera|manycam|droidcam|epoccam|xsplit|nvidia broadcast|iriun|camo/i;
+
+export function isVirtualCamera(device) {
+  return VIRTUAL_CAM.test(device?.label || '');
+}
+
+/** Real cameras first, in the order we should be willing to try them. */
+export function rankCameras(devices) {
+  return [...(devices || [])].sort(
+    (a, b) => (isVirtualCamera(a) ? 1 : 0) - (isVirtualCamera(b) ? 1 : 0));
+}
+
+/**
+ * Open whichever camera will actually start.
+ *
+ * Only reached once the preferred device has already failed, so the cost of
+ * walking the list is a failure that was going to be fatal anyway.
+ *
+ * @returns {Promise<{stream: MediaStream, device: MediaDeviceInfo}|null>}
+ */
+export async function openAnyCamera(skipId) {
+  for (const d of rankCameras(await listCameras())) {
+    if (d.deviceId === skipId) continue;
+    try {
+      return { stream: await openCamera(d.deviceId), device: d };
+    } catch { /* that one will not start either; try the next */ }
+  }
+  return null;
 }
 
 export async function listCameras() {

@@ -189,6 +189,11 @@ MediaPipe sometimes only finds one, in which case the sign can never fire and yo
 angle between your wrists a little. Measured tolerance of the scorer, for reference: it fires with
 ring/pinky extension up to ~0.6 and a crossing angle down to ~45°.
 
+Press **P** to cycle the debug views: off -> the background plate's colour -> its per-pixel
+confidence -> the hand-depth occluder drawn in magenta. That last one is how to check the
+occluder's capsules actually sit on your fingers in the video; it keeps writing depth, so what
+you see cut is what is really cut.
+
 ## Notes
 
 - **`#stage`'s `transform: scaleX(-1)` is the only mirror.** Frames fed to MediaPipe, landmarks and
@@ -206,6 +211,9 @@ ring/pinky extension up to ~0.6 and a crossing angle down to ~45°.
   __ras.effect.tuning.bladeGain  = 1.6    // arm brightness
   __ras.effect.tuning.darken     = 0.7    // how hard it stops down the background
   __ras.effect.tuning.hoverCm    = 3      // float height off the palm
+  __ras.effect.tuning.occlude    = true   // fingers nearer than the ball hide it
+  __ras.effect.tuning.fingerBiasCm   = 3.0  // forward push at the fingertips, 0 at the knuckle
+  __ras.effect.tuning.fingerRadiusCm = 1.1  // occluder finger radius; scales with the hand
   __ras.effect.tuning.spinMax    = 60     // rad/s
   __ras.effect.tuning.maxTiltDeg = 62     // how far from face-on it may tilt
   __ras.effect.tuning.scaleWithHand = true
@@ -219,6 +227,7 @@ ring/pinky extension up to ~0.6 and a crossing angle down to ~45°.
 
   ```javascript
   __rasSave({ alongPalm: 0.6, size: 1.2 })
+  __rasReset('alongPalm')          // back to the shipped default for one key; __rasReset() for all
   ```
 
   Everything else — radii, arm count and spiral curl, follow gains, prediction window, state
