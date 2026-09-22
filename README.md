@@ -196,10 +196,10 @@ you see cut is what is really cut.
 
 ## Sound
 
-Each jutsu has a sound (`src/audio.js`): the Rasenshuriken and Chidori play the two screams cut
+Each jutsu has a sound (`src/audio.js`), in two modes chosen in the settings panel. **Special**: the Rasenshuriken and Chidori play the two screams cut
 from `assets/audio/sasuke-naruto.mp3`, the clones play "Kage Bunshin no Jutsu!" (7.5-10 s of
-`assets/audio/kage-bunshin.mp3`), and the substitution plays a synthesised poof. Every cut is a
-`start`/`end` pair in `CUTS` at the top of `audio.js`, so re-cutting is two numbers. The mute
+`assets/audio/kage-bunshin.mp3`), and the substitution plays the smoke burst from `assets/audio/poof.mp3`. **Normal**: a chakra swirl (`rasengan-normal.mp3`, rendered at 2x speed) and an electric crackle (`chidori-normal.mp3`), looped while the jutsu is held; clones and substitution are the same in both modes. Every cut is a
+`start`/`end` pair in `MODES` at the top of `audio.js`, so re-cutting is two numbers. The mute
 button sits bottom right next to `?` and the setting persists.
 
 ## Performance

@@ -41,6 +41,7 @@ const stageEl = document.getElementById('stage');
 async function begin() {
   // The click that starts the camera is also the gesture that lets audio play.
   app.sfx.setMuted(settings.get().muted);
+  app.sfx.setMode(settings.get().soundMode);
   app.sfx.unlock();
   ui.showScreen('loading');
   const wanted = settings.get().deviceId;
@@ -133,10 +134,12 @@ async function begin() {
   // keeps the ball burning while the fingers close around it and lets it go
   // only on a fist -- offAt already IS the hold threshold. lostFrames is up
   // because a cupped hand self-occludes and MediaPipe drops it more often.
-  // Release is tuned for snap: two frames below the threshold, the score
-  // falling nearly as fast as the raw value, and a hand that vanishes while
-  // closing counts as closed after three frames.
-  const snap = { offFrames: 2, smoothDown: 0.85, lostFastFrames: 3 };
+  // Tuned for snap both ways. On: two frames above the threshold, not three
+  // (a false trigger still needs a genuinely open palm scored past 0.72 twice
+  // running). Off: two frames below, the score falling nearly as fast as the
+  // raw value, and a hand that vanishes while closing counts as closed after
+  // three frames.
+  const snap = { onFrames: 2, offFrames: 2, smoothDown: 0.85, lostFastFrames: 3 };
   app.palmSign = new SignTrigger({ onAt: 0.72, offAt: 0.12, lostFrames: 12, ...snap });
   app.chidoriSign = new SignTrigger({ onAt: 0.72, offAt: 0.42, ...snap });
   // lostFrames is generous: crossed hands occlude each other, and MediaPipe
@@ -289,7 +292,7 @@ function onFrame(frame) {
   if (pr.changed) {
     app.effect.setActive(pr.active);
     app.heldSide = pr.active && open.handIndex >= 0 ? app.sides[open.handIndex] : null;
-    if (pr.active) app.sfx.play('rasengan');
+    if (pr.active) app.sfx.play('rasengan'); else app.sfx.stop('rasengan');
   }
 
   /* --- the SAME open palm, on the other hand: Chidori.
@@ -318,7 +321,7 @@ function onFrame(frame) {
   }
   if (cd.changed) {
     app.chidori.setActive(cd.active);
-    if (cd.active) app.sfx.play('chidori');
+    if (cd.active) app.sfx.play('chidori'); else app.sfx.stop('chidori');
   }
 
   // Run the segmenter only while clones are on screen -- it is the most
@@ -540,6 +543,7 @@ settings.onChange((s, patch) => {
     app.effect?.setActive(false);
     if (app.chidoriSign) app.chidoriSign.active = false;
     app.chidori?.setActive(false);
+    app.sfx.stop('rasengan'); app.sfx.stop('chidori');
   }
   if ('size' in patch) app.effect?.setSize(s.size);
   if ('alongPalm' in patch && app.effect) app.effect.tuning.alongPalm = s.alongPalm;
@@ -553,6 +557,7 @@ settings.onChange((s, patch) => {
   if ('bladeWhite' in patch && app.effect) app.effect.tuning.bladeWhite = s.bladeWhite;
   if ('debug' in patch && !s.debug) ui.setDebug(null);
   if ('muted' in patch) { app.sfx.setMuted(s.muted); ui.setMuted(s.muted); }
+  if ('soundMode' in patch) app.sfx.setMode(s.soundMode);
 });
 
 document.addEventListener('visibilitychange', () => {
