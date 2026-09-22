@@ -194,6 +194,16 @@ confidence -> the hand-depth occluder drawn in magenta. That last one is how to 
 occluder's capsules actually sit on your fingers in the video; it keeps writing depth, so what
 you see cut is what is really cut.
 
+## Throwing it
+
+Whip the hand while holding the Rasenshuriken and it leaves the palm along the swing -- across
+the frame, at the camera, or away into the room -- spinning as it goes. Into the lens it detonates
+in a white-out; into the distance it bursts far off; off the side it just leaves the picture. The
+hand is then empty until the palm closes (or leaves) and opens again. The throw needs the smoothed
+hand speed past `throwSpeed` (150 cm/s) on two frames AND `throwDistCm` (14 cm, scaled by hand
+size) of travel inside 120 ms; both live in `__ras.effect.tuning`, and the debug overlay's `throw`
+line shows the live values against them. `__ras.effect.throw([0,0,1])` throws one by hand.
+
 ## Sound
 
 Each jutsu has a sound (`src/audio.js`), in two modes chosen in the settings panel. **Special**: the Rasenshuriken and Chidori play the two screams cut

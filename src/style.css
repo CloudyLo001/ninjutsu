@@ -240,6 +240,17 @@ input[type=range] { cursor: pointer; }
 }
 #jutsu-btn:hover { background: rgba(0,0,0,.78); }
 
+/* --------------------------------------------------------------- flash */
+
+/* The Rasenshuriken hitting the camera. Above the stage, below the buttons. */
+#flash {
+  position: fixed; inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 25;
+}
+
 /* ---------------------------------------------------------------- mute */
 
 #mute-btn {

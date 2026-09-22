@@ -151,12 +151,14 @@ function bindSettings() {
   const s = settings.get();
   $('opt-size').value = String(s.size);
   $('opt-debug').checked = s.debug;
+  $('opt-throw').checked = s.throwEnabled;
   $('opt-hand').value = s.rasenganHand;
   $('opt-sound').value = s.soundMode;
 
   $('opt-size').addEventListener('input', (e) => settings.set({ size: parseFloat(e.target.value) }));
   $('opt-hand').addEventListener('change', (e) => settings.set({ rasenganHand: e.target.value }));
   $('opt-sound').addEventListener('change', (e) => settings.set({ soundMode: e.target.value }));
+  $('opt-throw').addEventListener('change', (e) => settings.set({ throwEnabled: !!e.target.checked }));
   $('opt-debug').addEventListener('change', (e) => {
     settings.set({ debug: e.target.checked });
     if (!e.target.checked) setDebug(null);

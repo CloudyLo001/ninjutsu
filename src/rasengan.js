@@ -32,6 +32,11 @@ const FOLLOW_ROT = 30;
 const PREDICT_MS = 45;     // how far ahead to extrapolate between CV frames
 
 const T_FORM = 0.30, T_EXPAND = 0.22, T_DISSIPATE = 0.16;   // quick both ways: it answers the hand
+const T_BURST = 0.45;      // the detonation at the end of a throw
+const MAX_FLIGHT_S = 1.4;  // a throw into the room bursts by here whatever
+const FAR_CM = 260;        // or once it is this deep into the room
+const THROW_WINDOW_MS = 120;   // the swing is measured over this much recent hand motion
+const THROW_HIST = 12;
 
 // EMA weight per CV frame for the finger-joint offsets fed to the occluder.
 // Lateral noise is a couple of pixels; z noise is not, and at the ball's
@@ -162,6 +167,8 @@ const _y = new THREE.Vector3();
 const _z = new THREE.Vector3();
 const _pred = new THREE.Vector3();
 const _proj = new THREE.Vector3();
+const _swing = new THREE.Vector3();
+const _dir = new THREE.Vector3();
 const _q = new THREE.Quaternion();
 const _qTo = new THREE.Quaternion();
 const ZAXIS = new THREE.Vector3(0, 0, 1);
@@ -200,6 +207,16 @@ export class Rasengan {
       occlude: true,
       fingerBiasCm: 1.5,     // forward push at the fingertips, MediaPipe under-reports a curl
       fingerRadiusCm: 1.1,   // occluder finger radius at a 9 cm palm
+      // Throwing. A whip of the hand launches it: the smoothed hand speed
+      // must pass throwSpeed on two CV frames running AND the hand must have
+      // moved throwDistCm (scaled by hand size) inside the last
+      // THROW_WINDOW_MS -- speed alone is fooled by depth jitter, distance
+      // alone by a slow reach. The launch speed follows the swing, clamped.
+      throwSpeed: 110,       // cm/s; a lazy wave is ~60, a real throwing flick 250+
+      throwDistCm: 9,        // cm of travel inside the window; guards against a single jumpy frame
+      flightSpeedMin: 220, flightSpeedMax: 480,
+      hitZ: 22,              // cm from the lens at which it counts as hitting the camera
+      throwEnabled: true,    // settings: off, and a whip is just a whip
     };
     this.handScale = 1;
 
@@ -211,6 +228,21 @@ export class Rasengan {
     stage.scene.add(this.proxy.object3d);
     this._offs = Array.from({ length: 21 }, () => new THREE.Vector3());
     this._haveShape = false;
+
+    // Throw detection and flight. The history is a pooled ring of recent
+    // palm samples; the smoothed velocity is the one the throw reads.
+    this._hist = [];
+    this._velSmooth = new THREE.Vector3();
+    this._fastFrames = 0;
+    this._flightPos = new THREE.Vector3();
+    this._flightDir = new THREE.Vector3(0, 0, 1);
+    this._flightSpeed = 0;
+    this._flightT = 0;
+    this._hitCamera = false;
+    this._burstDepth = 60;
+    this.throwDbg = { speed: 0, dist: 0, peakSpeed: 0, peakDist: 0, peakT: 0, via: '' };   // peaks decay, for reading off the overlay
+    this.onThrow = null;     // ({ dir, speed }) => void
+    this.onBurst = null;     // ({ camera }) => void
 
     this.state = 'IDLE';
     this.t = 0;
@@ -345,6 +377,8 @@ export class Rasengan {
     }
     this._targetPos.copy(position);
     this._lastPoseT = now;
+    this._velSmooth.lerp(this._vel, 0.5);
+    this._sample(position, now);
 
     // The normal arrives already pointing OUT of the palm -- palm.js signs it
     // by handedness -- so it is used as-is. No forcing it toward the camera and
@@ -391,8 +425,127 @@ export class Rasengan {
     this.state = s;
     this.t = 0;
     if (s === 'EXPAND') this.stage.setShake(0.3);
-    // A re-acquired hand must not lerp out of a stale shape.
-    if (s === 'FORMING') this._haveShape = false;
+    if (s === 'FORMING') { this._haveShape = false; this._hist.length = 0; this._fastFrames = 0; }
+    if (s === 'BURST') { this.stage.setShake(0.6); this.onBurst?.({ camera: this._hitCamera }); }
+  }
+
+  /**
+   * Record one palm sample and decide whether the hand just threw. Only a
+   * settled ACTIVE ball can be thrown: the form-up itself moves the hand.
+   */
+  _sample(position, now) {
+    const h = this._hist;
+    const s = h.length >= THROW_HIST ? h.shift() : { p: new THREE.Vector3(), t: 0 };
+    s.p.copy(position); s.t = now;
+    h.push(s);
+    // The tracker's rate decides everything here. At 30 Hz a whip spans
+    // several samples; on a starved tracker at 6 Hz it is ONE sample 160 ms
+    // after the last. So the window stretches with the frame gap, the speed
+    // is the raw per-frame figure as well as the smoothed one (the EMA lags
+    // a whole whip at low rates), and one fast sample is enough to fire when
+    // samples are that far apart.
+    const prev = h.length >= 2 ? h[h.length - 2] : null;
+    const gapMs = prev ? now - prev.t : 33;
+    const windowMs = Math.max(THROW_WINDOW_MS, 2.5 * gapMs);
+    let base = s;
+    for (const q of h) { if (now - q.t <= windowMs) { base = q; break; } }
+    _swing.subVectors(position, base.p);
+    const dist = _swing.length();
+    const speed = Math.max(this._vel.length(), this._velSmooth.length());
+    this.throwDbg.speed = speed; this.throwDbg.dist = dist;
+    if (speed > this.throwDbg.peakSpeed || now - this.throwDbg.peakT > 2500) {
+      this.throwDbg.peakSpeed = speed; this.throwDbg.peakDist = dist; this.throwDbg.peakT = now;
+    }
+
+    // Throwable once the blades are most of the way out: people throw the
+    // instant it forms, and waiting for ACTIVE swallowed those.
+    const armed = this.tuning.throwEnabled && (this.state === 'ACTIVE' || (this.state === 'EXPAND' && this.progress > 0.5));
+    if (!armed) { this._fastFrames = 0; return; }
+    const fast = speed > this.tuning.throwSpeed && dist > this.tuning.throwDistCm * this.handScale;
+    this._fastFrames = fast ? this._fastFrames + 1 : 0;
+    const confirm = gapMs > 50 ? 1 : 2;   // one fast sample is all a whip gives at ordinary tracker rates
+    if (this._fastFrames >= confirm) {
+      const launch = THREE.MathUtils.clamp(1.5 * speed, this.tuning.flightSpeedMin, this.tuning.flightSpeedMax);
+      this.throwDbg.via = 'detector';
+      this.throw(_swing, launch, true);
+    }
+  }
+
+  /**
+   * The hand is about to be lost or the sign is dropping: if it was moving
+   * fast, that IS the throw. A real whip blurs the hand and MediaPipe drops
+   * it for a few frames, so the samples that would have crossed the threshold
+   * never arrive; without this the ball just dissipates in the hand.
+   */
+  throwIfSwinging() {
+    const armed = this.tuning.throwEnabled && (this.state === 'ACTIVE' || (this.state === 'EXPAND' && this.progress > 0.5));
+    if (!armed) return false;
+    const speed = Math.max(this._vel.length(), this._velSmooth.length());
+    if (speed < this.tuning.throwSpeed * 0.6 || this.throwDbg.dist < this.tuning.throwDistCm * this.handScale * 0.4) return false;
+    const launch = THREE.MathUtils.clamp(1.5 * speed, this.tuning.flightSpeedMin, this.tuning.flightSpeedMax);
+    this.throwDbg.via = 'release';
+    return this.throw(this._velSmooth, launch, true);
+  }
+
+  /**
+   * Launch it along `dir` (camera space; +z is toward the lens) at `speed`
+   * cm/s. Called by the detector, and by the harness. Returns false if there
+   * is nothing to throw.
+   */
+  throw(dir, speed = 300, fromHand = false) {
+    if (this.state !== 'ACTIVE' && this.state !== 'EXPAND') return false;
+    if (Array.isArray(dir)) _dir.set(dir[0], dir[1], dir[2]); else _dir.copy(dir);
+    // Depth comes from the hand's apparent size and jitters by centimetres
+    // per frame, so a sideways swing picks up a spurious toward/away part
+    // that sends the ball into the lens. Unless the swing is clearly along
+    // the camera axis, the throw is kept in the picture plane.
+    if (fromHand && Math.abs(_dir.z) < 1.0 * Math.hypot(_dir.x, _dir.y)) _dir.z = 0;
+    if (_dir.lengthSq() < 1e-6) _dir.set(0, 0, 1);
+    this._flightDir.copy(_dir).normalize();
+    // At the camera it has only ~30 cm to cover: at full whip speed that is
+    // a single frame and the flight is never seen. Slowed so the approach --
+    // the disc swelling to fill the view -- lasts long enough to register.
+    if (this._flightDir.z > 0.5) speed = Math.min(speed, 160);
+    this._flightSpeed = speed;
+    this._flightPos.copy(this.group.position);
+    this._flightT = 0;
+    this._fastFrames = 0;
+    this._hitCamera = false;
+    this._enter('FLIGHT');
+    this.onThrow?.({ dir: this._flightDir.clone(), speed });
+    return true;
+  }
+
+  /** One step of flight, and the three ways it ends. */
+  _fly(dt, size) {
+    this._flightT += dt;
+    const ramp = Math.min(1, this._flightT / 0.08);        // leaves the hand, does not teleport
+    this._flightPos.addScaledVector(this._flightDir, this._flightSpeed * ramp * dt);
+    const cam = this.stage.camera;
+    const z = this._flightPos.z, depth = -z;
+    // In the lens: white-out. Only for a throw that is actually coming this
+    // way, and only once it has visibly left the hand -- a hand held close to
+    // the camera already sits inside hitZ, and a sideways throw from there
+    // must not detonate on the spot. Reaching the near plane always counts.
+    const toward = this._flightDir.z > 0.3;
+    if ((toward && z > -this.tuning.hitZ && this._flightT >= 0.1) || z > -3) {
+      this._hitCamera = true; this._burstDepth = Math.max(depth, 1);
+      this._enter('BURST');
+      return;
+    }
+    // Off the edge: gone, with the barest flash so the exit registers.
+    _proj.copy(this._flightPos).project(cam);
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
+    const rNdc = (BLADE_R * size) / (Math.max(1, depth) * tanHalf);
+    if (Math.abs(_proj.y) > 1 + rNdc || Math.abs(_proj.x) > 1 + rNdc / cam.aspect) {
+      this.stage.setFlash?.(0.15);
+      this._enter('IDLE');
+      return;
+    }
+    if (depth > FAR_CM || this._flightT > MAX_FLIGHT_S) {  // away into the room: distant burst
+      this._hitCamera = false; this._burstDepth = depth;
+      this._enter('BURST');
+    }
   }
 
   /**
@@ -406,17 +559,19 @@ export class Rasengan {
   }
 
   get progress() {
-    const dur = { FORMING: T_FORM, EXPAND: T_EXPAND, DISSIPATE: T_DISSIPATE }[this.state];
+    const dur = { FORMING: T_FORM, EXPAND: T_EXPAND, DISSIPATE: T_DISSIPATE, BURST: T_BURST }[this.state];
     return dur ? Math.min(1, this.t / dur) : 1;
   }
 
   update(dt) {
     this.t += dt;
+    const size = this.sizeMul * (this.tuning.scaleWithHand ? this.handScale : 1);
+    if (this.state === 'FORMING' && this.progress >= 1) this._enter('EXPAND');
+    else if (this.state === 'EXPAND' && this.progress >= 1) this._enter('ACTIVE');
+    else if (this.state === 'DISSIPATE' && this.progress >= 1) this._enter('IDLE');
+    else if (this.state === 'BURST' && this.progress >= 1) { this._enter('IDLE'); this.stage.setFlash?.(0); }
+    if (this.state === 'FLIGHT') this._fly(dt, size);
     const p = this.progress;
-
-    if (this.state === 'FORMING' && p >= 1) this._enter('EXPAND');
-    else if (this.state === 'EXPAND' && p >= 1) this._enter('ACTIVE');
-    else if (this.state === 'DISSIPATE' && p >= 1) this._enter('IDLE');
 
     let coreScale = 0, bladeExt = 0, energy = 0, spinTarget = 0, gather = 0, glow = 0;
     switch (this.state) {
@@ -452,6 +607,22 @@ export class Rasengan {
         glow = 0.42 * (1 - e);
         break;
       }
+      case 'FLIGHT':
+        coreScale = 1; bladeExt = 1; energy = 1;
+        spinTarget = this.tuning.spinMax * 1.25; glow = 0.7;
+        break;
+      case 'BURST': {
+        // Swells to several times its size and burns out; a distant one is
+        // scaled up further so it still reads across the room.
+        const e = easeOut(p);
+        coreScale = (1 + 3.5 * e) * Math.max(1, this._burstDepth / 60);
+        bladeExt = Math.max(0, 1 - p * 3);
+        energy = 1 - easeIn(p);
+        spinTarget = 0;
+        glow = 1.0 * (1 - p);
+        this.stage.setFlash?.((this._hitCamera ? 1.0 : 0.3) * (1 - e));
+        break;
+      }
       default: break;
     }
 
@@ -459,15 +630,16 @@ export class Rasengan {
     this.angle = (this.angle + this.spin * dt) % (Math.PI * 2);
     this.energy = energy;
 
-    const size = this.sizeMul * (this.tuning.scaleWithHand ? this.handScale : 1);
     this.group.visible = this.state !== 'IDLE';
     if (!this.group.visible) {
       this.stage.bgUniforms.uGlow.value *= 0.8;
       this.stage.setShake(this.stage.shake * 0.8);
+      this.stage.setFlash?.((this.stage.flash ?? 0) * 0.8);
       this.stage.bloom?.setStrength(0);   // nothing to bloom; skip the passes
       this.proxy.object3d.visible = false;
       return;
     }
+    const flying = this.state === 'FLIGHT' || this.state === 'BURST';
 
     /* ---- pose: predict forward, then follow hard -------------------- */
 
@@ -475,20 +647,26 @@ export class Rasengan {
     // pose is used it is already up to a frame and a half old. Extrapolating
     // along the measured velocity removes that stale-data lag, which is most
     // of what reads as latency; the follow gain only smooths the remainder.
-    const age = Math.min(PREDICT_MS, performance.now() - this._lastPoseT) / 1000;
-    _pred.copy(this._targetPos).addScaledVector(this._vel, age);
+    if (flying) {
+      // Thrown: it goes where the flight takes it, with the orientation it
+      // left the hand in. The hand is no longer consulted.
+      this.group.position.copy(this._flightPos);
+    } else {
+      const age = Math.min(PREDICT_MS, performance.now() - this._lastPoseT) / 1000;
+      _pred.copy(this._targetPos).addScaledVector(this._vel, age);
 
-    const aPos = 1 - Math.exp(-FOLLOW_POS * dt);
-    const aRot = 1 - Math.exp(-FOLLOW_ROT * dt);
-    this._pos.lerp(_pred, aPos);
-    this._quat.slerp(this._targetQuat, aRot);
+      const aPos = 1 - Math.exp(-FOLLOW_POS * dt);
+      const aRot = 1 - Math.exp(-FOLLOW_ROT * dt);
+      this._pos.lerp(_pred, aPos);
+      this._quat.slerp(this._targetQuat, aRot);
 
-    // Rest it on the palm side of the hand, out along the (smoothed) palm
-    // normal: the underside of the ball hoverCm above the skin. The group's +Z
-    // IS that normal, so the blade disc lies flat in the palm plane with it.
-    _z.set(0, 0, 1).applyQuaternion(this._quat);
-    const ballR = CORE_R * this.coreMul * size;
-    this.group.position.copy(this._pos).addScaledVector(_z, this.tuning.hoverCm + ballR);
+      // Rest it on the palm side of the hand, out along the (smoothed) palm
+      // normal: the underside of the ball hoverCm above the skin. The group's +Z
+      // IS that normal, so the blade disc lies flat in the palm plane with it.
+      _z.set(0, 0, 1).applyQuaternion(this._quat);
+      const ballR = CORE_R * this.coreMul * size;
+      this.group.position.copy(this._pos).addScaledVector(_z, this.tuning.hoverCm + ballR);
+    }
     this.group.quaternion.copy(this._quat);
     this.group.scale.setScalar(size);
 
@@ -501,7 +679,7 @@ export class Rasengan {
     // palm plane the finger offsets were measured from. The ball above uses the
     // hovered copy; the proxy must not, or the fingers would float forward with
     // it and the cut would land in the wrong place.
-    const occ = !!this.tuning.occlude && this._haveShape;
+    const occ = !!this.tuning.occlude && this._haveShape && !flying;   // nothing to hide behind once thrown
     this.proxy.object3d.visible = occ;
     if (occ) this.proxy.pose(this._pos, this._offs, (this.tuning.fingerRadiusCm ?? 1.1) * this.handScale);
 
@@ -529,7 +707,7 @@ export class Rasengan {
     this.glowInner.material.opacity = Math.min(0.95, 0.40 * energy * g);
     this.glowOuter.scale.setScalar(BLADE_R * 1.9 * Math.max(0.25, bladeExt));
     this.glowOuter.material.opacity = Math.min(0.75, 0.16 * energy * Math.max(0.3, bladeExt) * g);
-    this.stage.bloom?.setStrength(0.75 * g * energy);
+    this.stage.bloom?.setStrength((this.state === 'BURST' ? 1.6 : 0.75) * g * energy);
 
     if (this.blades) {
       this.blades.setSpin(this.angle);
@@ -563,6 +741,7 @@ export class Rasengan {
     u.uGlow.value += (Math.min(1, glow * g) - u.uGlow.value) * 0.3;
     u.uGlowRadius.value = 0.63 * size;   // scales with the effect
     if (this.state === 'ACTIVE') this.stage.setShake(0.04 + 0.015 * Math.sin(this.t * 40));
+    else if (this.state === 'FLIGHT') this.stage.setShake(0.02);
     else if (this.state !== 'EXPAND') this.stage.setShake(this.stage.shake * 0.85);
   }
 

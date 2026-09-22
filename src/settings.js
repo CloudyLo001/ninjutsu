@@ -29,6 +29,7 @@ export const DEFAULTS = {
   deviceId: null,     // camera deviceId, null = browser default
   debug: false,
   muted: false,       // jutsu sound effects off
+  throwEnabled: true, // a whip of the hand throws the Rasenshuriken
   soundMode: 'special', // 'normal' (effects) | 'special' (the anime screams)
 };
 

@@ -36,12 +36,16 @@ export const MODES = {
     chidori:      { clip: 'sasukeNaruto', start: 1.55, end: 2.95, gain: 1.0, synth: 'crackle' },  // "SASUKE!"
     clones:       { clip: 'kageBunshin',  start: 8.25, end: 10.0, gain: 1.0 },                    // "Kage Bunshin no Jutsu!"
     substitution: { clip: 'poof',         start: 1.50, end: 2.30, gain: 1.0, synth: 'poof' },     // the big burst's tail
+    throw:        { synth: 'whoosh', gain: 0.9 },
+    burst:        { synth: 'boom', gain: 1.0 },
   },
   normal: {
     rasengan:     { clip: 'rasenganNormal', start: 0.15, end: 5.15, loop: true, gain: 1.0, synth: 'hum' },
     chidori:      { clip: 'chidoriNormal',  start: 1.30, end: 6.25, loop: true, gain: 1.0, synth: 'crackle' },
     clones:       { clip: 'kageBunshin',    start: 8.25, end: 10.0, gain: 1.0 },                    // same as special
     substitution: { clip: 'poof',           start: 1.50, end: 2.30, gain: 1.0, synth: 'poof' },     // same as special
+    throw:        { synth: 'whoosh', gain: 0.9 },
+    burst:        { synth: 'boom', gain: 1.0 },
   },
 };
 
@@ -162,7 +166,57 @@ export class Sfx {
     if (kind === 'poof') return this._poof(name, gain);
     if (kind === 'hum') return this._hum(name, gain);
     if (kind === 'crackle') return this._crackle(name, gain);
+    if (kind === 'whoosh') return this._whoosh(name, gain);
+    if (kind === 'boom') return this._boom(name, gain);
     return false;
+  }
+
+  /** The throw: a band of noise sweeping up and away, 0.4 s. */
+  _whoosh(name, gain) {
+    const t = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noise;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.Q.value = 1.4;
+    bp.frequency.setValueAtTime(300, t);
+    bp.frequency.setTargetAtTime(3200, t, 0.12);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(gain, t + 0.04);
+    g.gain.setTargetAtTime(0, t + 0.12, 0.12);
+    src.connect(bp).connect(g).connect(this.master);
+    src.start(t);
+    src.stop(t + 0.8);
+    this._voice(name, [src], g);
+    return true;
+  }
+
+  /** The detonation: a sine dropping into the floor under a low thud of noise. */
+  _boom(name, gain) {
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(110, t);
+    osc.frequency.setTargetAtTime(35, t, 0.18);
+    const oscG = this.ctx.createGain(); oscG.gain.value = 0.9;
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = this.noise;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.Q.value = 0.6;
+    lp.frequency.setValueAtTime(1800, t);
+    lp.frequency.setTargetAtTime(150, t, 0.25);
+    const noiseG = this.ctx.createGain(); noiseG.gain.value = 0.6;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(gain, t + 0.02);
+    g.gain.setTargetAtTime(0, t + 0.08, 0.28);
+    osc.connect(oscG).connect(g);
+    noise.connect(lp).connect(noiseG).connect(g);
+    g.connect(this.master);
+    osc.start(t); noise.start(t);
+    osc.stop(t + 1.6); noise.stop(t + 1.6);
+    this._voice(name, [osc, noise], g);
+    return true;
   }
 
   /** A burst of smoke: filtered noise, hard attack, long tail. */

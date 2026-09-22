@@ -84,6 +84,7 @@ void main() {
 export class Stage {
   constructor(canvas, video, stageEl) {
     this.canvas = canvas; this.video = video; this.stageEl = stageEl;
+    this.flash = 0; this.flashEl = null;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
     this.renderer.autoClear = false;
@@ -158,6 +159,19 @@ export class Stage {
   }
 
   setShake(amount) { this.shake = this.reducedMotion ? amount * 0.3 : amount; }
+
+  /**
+   * White-out, 0..1. A DOM overlay rather than a shader term: it has to sit
+   * over the bloom and the UI's effect layers, and it must not move with the
+   * stage's mirror/shake transform.
+   */
+  setFlash(amount) {
+    const a = Math.max(0, Math.min(1, amount || 0));
+    if (a === this.flash) return;
+    this.flash = a;
+    if (!this.flashEl) this.flashEl = document.getElementById('flash');
+    if (this.flashEl) this.flashEl.style.opacity = a < 0.005 ? '0' : a.toFixed(3);
+  }
 
   _applyShake(t) {
     let x = 0, y = 0;

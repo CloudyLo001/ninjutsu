@@ -29,6 +29,7 @@ const app = {
   crossDbg: {}, ramDbg: {}, ramScoreV: 0, forceClones: false, sides: [],
   sfx: new Sfx(),
   offs: Array.from({ length: 21 }, () => new THREE.Vector3()), heldSide: null, debugView: 0,
+  rearm: false,   // after a throw: the palm must close (or leave) before a new one can form
   renderDivider: 1, renderDividerLock: false,   // see renderLoop
 };
 
@@ -99,8 +100,20 @@ async function begin() {
   app.effect.tuning.fingerRadiusCm = settings.get().fingerRadiusCm;
   app.effect.tuning.glow = settings.get().glow;
   app.effect.tuning.bladeWhite = settings.get().bladeWhite;
+  app.effect.tuning.throwEnabled = settings.get().throwEnabled;
   ui.setLoading(0.86, 'Loading the Rasenshuriken…');
   await app.effect.initBlades();
+  // A throw takes the ball off the hand: the sign is dropped SILENTLY (no
+  // changed event, so nothing dissipates the flying ball or stops its
+  // sound path twice) and cannot re-arm until the palm closes or leaves.
+  app.effect.onThrow = () => {
+    app.palmSign.active = false; app.palmSign.s = 0; app.palmSign._above = 0;
+    app.heldSide = null;
+    app.rearm = true;
+    app.sfx.stop('rasengan');
+    app.sfx.play('throw');
+  };
+  app.effect.onBurst = () => app.sfx.play('burst');
 
   app.chidori = new Chidori(app.stage);
   app.chidori.tuning.size = settings.get().chidoriSize;
@@ -150,7 +163,7 @@ async function begin() {
   // winner-takes-all step in onFrame: the two seals share every scoring term
   // but the meet point, and near a meet of ~0.85 both are half-satisfied, so a
   // low bar here would otherwise fire on a high-crossed X.
-  app.ramSign = new SignTrigger({ onAt: 0.36, offAt: 0.22, onFrames: 3, lostFrames: 20 });
+  app.ramSign = new SignTrigger({ onAt: 0.30, offAt: 0.18, onFrames: 2, lostFrames: 20 });
 
   ui.initJutsuMenu({
     paper: app.palmSign.onAt,
@@ -238,7 +251,10 @@ function onFrame(frame) {
 
   // While substituted the player is supposed to be absent, so nothing else
   // may fire -- a Rasenshuriken out of an empty room would break the trick.
-  const away = !!app.subst?.hidden;
+  // Likewise while a thrown Rasenshuriken is still in the air or bursting:
+  // one jutsu finishes before the next can start.
+  const flying = app.effect?.state === 'FLIGHT' || app.effect?.state === 'BURST';
+  const away = !!app.subst?.hidden || flying;
 
   /* --- the two two-handed seals, scored together. Ram (substitution) and
      cross (clones) are the same hand shape and differ only in where the index
@@ -276,7 +292,15 @@ function onFrame(frame) {
                                 : (want === 'any' || app.sides[i] === want || app.sides[i] === 'unknown');
   const open = bestOpenHand(world, allowHand);
   const suppressed = away || cr.active || cross > 0.4 || rr.active || ram > 0.4;
-  const pr = app.palmSign.update(suppressed ? 0 : open.score, open.handIndex >= 0);
+  // Re-arm after a throw only once the thrown one is finished AND the hand
+  // has closed or gone -- the previous jutsu completes before the next.
+  if (app.rearm && !flying && (open.handIndex < 0 || open.score < app.palmSign.offAt)) app.rearm = false;
+  // A whip blurs the hand: MediaPipe drops it, or the openness score
+  // collapses, before the throw detector sees enough fast frames. If the
+  // hand was swinging when that happens, release the ball along the swing
+  // instead of letting the sign's release dissipate it in the hand.
+  if (app.palmSign.active && (open.handIndex < 0 || open.score < app.palmSign.offAt)) app.effect.throwIfSwinging();
+  const pr = app.palmSign.update(suppressed || app.rearm ? 0 : open.score, open.handIndex >= 0);
   app.score = pr.score;
 
   if (open.handIndex >= 0 && image[open.handIndex]) {
@@ -285,9 +309,11 @@ function onFrame(frame) {
     app.effect.setHandSize(app.pose.palmCm);
     app.effect.setPose(app.pose.position, app.pose.normal, app.pose.tangent);
     app.effect.setGlowUv(app.pose.uv.u, app.pose.uv.v);
-    handOffsets(image[open.handIndex], world[open.handIndex], app.stage.camera, app.pose,
-                app.effect.tuning.fingerBiasCm ?? 3.0, app.offs);
-    app.effect.setHandShape(app.offs);
+    if (app.effect.state !== 'FLIGHT' && app.effect.state !== 'BURST') {   // nothing to occlude once thrown
+      handOffsets(image[open.handIndex], world[open.handIndex], app.stage.camera, app.pose,
+                  app.effect.tuning.fingerBiasCm ?? 3.0, app.offs);
+      app.effect.setHandShape(app.offs);
+    }
   }
   if (pr.changed) {
     app.effect.setActive(pr.active);
@@ -365,14 +391,16 @@ function balanceRender() {
   // the main thread -- at a quiet moment, because the switch reloads the
   // model and would drop a running jutsu.
   if (app.renderDivider !== 2) return;
-  if (app.effect?.group.visible || app.chidori?.group.visible) {
-    starve.push(ms);
-    if (starve.length > 40) starve.shift();
-  }
-  if (starve.length < 40) return;
-  const median = [...starve].sort((a, b) => a - b)[20];
+  starve.push(ms);
+  if (starve.length > 20) starve.shift();
+  if (starve.length < 20) return;
+  const median = [...starve].sort((a, b) => a - b)[10];
   const busy = app.effect?.active || app.chidori?.active || app.subst?.active || app.clones?.active;
-  if (median > 120 && !busy && !app.cvSwitching) {
+  // Either symptom counts: slow inference, or few results a second even when
+  // each one is quick. Measured on a laptop with an integrated GPU: 108 ms and
+  // 9 results/s with nothing drawn, 6/s with a jutsu up -- the main thread
+  // managed 14/s there.
+  if ((median > 100 || app.cv.stats.fps < 10) && !busy && !app.cvSwitching) {
     app.cvSwitching = true;
     app.renderDivider = 1;
     app.cv.switchToInline(`median ${median.toFixed(0)} ms with effects up`).finally(() => { app.cvSwitching = false; });
@@ -420,6 +448,8 @@ function stepFrame(now, dt) {
       `hands    ${(s?.handMs ?? 0).toFixed(1)} ms  (${app.latest?.hands?.landmarks?.length ?? 0} found)\n` +
       `paper    ${app.score.toFixed(3)} (${app.palmSign?.active ? 'ON' : 'off'})  ` +
         `want ${settings.get().rasenganHand}  saw [${(app.sides || []).join(', ') || '-'}]\n` +
+      `throw    v ${(app.effect?.throwDbg.speed ?? 0).toFixed(0)} cm/s  d ${(app.effect?.throwDbg.dist ?? 0).toFixed(1)} cm   peak v ${(app.effect?.throwDbg.peakSpeed ?? 0).toFixed(0)} d ${(app.effect?.throwDbg.peakDist ?? 0).toFixed(1)}  (need ${app.effect?.tuning.throwSpeed ?? 0} / ${app.effect?.tuning.throwDistCm ?? 0})  ${app.effect?.state ?? '-'}${app.rearm ? '  re-arm: close hand' : ''}
+` +
       `anchor   along ${(app.effect?.tuning.alongPalm ?? 0).toFixed(2)}  hover ${(app.effect?.tuning.hoverCm ?? 0).toFixed(1)}cm  overrides [${settings.overridden().join(', ') || 'none'}]\n` +
       `occlude  ${app.effect?.tuning.occlude ? 'on ' : 'off'}  bias ${(app.effect?.tuning.fingerBiasCm ?? 0).toFixed(1)}cm  r ${(app.effect?.tuning.fingerRadiusCm ?? 0).toFixed(1)}cm  dz tips [${(app.pose?.dzTips || []).map((v) => v.toFixed(1)).join(' ') || '-'}]  [P]x3 proxy\n` +
       `chidori  ${(app.chidoriScoreV ?? 0).toFixed(3)} (${app.chidoriSign?.active ? 'ON' : 'off'})\n` +
@@ -558,6 +588,7 @@ settings.onChange((s, patch) => {
   if ('debug' in patch && !s.debug) ui.setDebug(null);
   if ('muted' in patch) { app.sfx.setMuted(s.muted); ui.setMuted(s.muted); }
   if ('soundMode' in patch) app.sfx.setMode(s.soundMode);
+  if ('throwEnabled' in patch && app.effect) app.effect.tuning.throwEnabled = s.throwEnabled;
 });
 
 document.addEventListener('visibilitychange', () => {
