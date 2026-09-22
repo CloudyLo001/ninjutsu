@@ -32,14 +32,19 @@ const _mid = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Vecto
 const _rot = new THREE.Quaternion(), _qI = new THREE.Quaternion(), _m = new THREE.Matrix4();
 
 export class HandProxy {
-  constructor() {
+  /**
+   * @param {{material?: THREE.Material}} [opts] a visible material makes this
+   *   a DRAWN hand rather than an occluder -- the Chidori lights the hand up
+   *   with exactly the same geometry the Rasengan hides behind.
+   */
+  constructor(opts = {}) {
     this.object3d = new THREE.Group();
     this.object3d.visible = false;
 
     // Opaque on purpose: it lands in the opaque bucket and is in the depth
     // buffer before any transparent effect object is drawn. DoubleSide so the
     // flat palm counts from whichever way it is facing.
-    this.material = new THREE.MeshBasicMaterial({
+    this.material = opts.material || new THREE.MeshBasicMaterial({
       colorWrite: false, depthWrite: true, depthTest: true, side: THREE.DoubleSide,
     });
     // For checking registration against the video. Still writes depth, so
@@ -109,6 +114,9 @@ export class HandProxy {
     _c.divideScalar(n);
     P[n * 3] = _c.x; P[n * 3 + 1] = _c.y; P[n * 3 + 2] = _c.z;
     this.palmAttr.needsUpdate = true;
+    // The occluder never reads normals, but a lit hand's fresnel does, and a
+    // fan without them hands the shader zeros. Seven triangles: free.
+    this.palm.geometry.computeVertexNormals();
   }
 
   dispose() {

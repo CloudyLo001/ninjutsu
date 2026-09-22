@@ -28,7 +28,7 @@ const LOG_DEPTH_CM = 95;  // roughly body distance; hands sit much closer
 // How long the burst lasts. Outlives the log's flight (T_LOG_OUT) on purpose,
 // so the gas is still clearing as the log drops away rather than the two
 // finishing together and the frame going abruptly empty.
-const SMOKE_SPAN = 1.6;
+const SMOKE_SPAN = 2.3;
 
 /* -------------------------------------------------------------- shaders */
 
@@ -55,50 +55,66 @@ uniform sampler2D uMask;
 uniform float uAmount;       // 0 = visible, 1 = gone
 uniform float uMaskFlipY;
 uniform float uPlateFlipY;
-uniform float uAspect;       // frame w/h, to keep the dilation round in pixels
+uniform float uAspect;       // frame w/h, to keep the kernels round in pixels
 varying vec2 vScreenUv;
+
+// Confidence-weighted average of the plate over a ring of taps: what the room
+// looks like AROUND here, according only to pixels the plate is sure of.
+void ring(vec2 uv, vec2 r, float wr, inout vec3 sum, inout float wsum) {
+  for (int i = 0; i < 8; i++) {
+    float t = float(i) * 0.7853982;            // 45 degree steps
+    vec4 s = texture2D(uPlate, uv + vec2(cos(t), sin(t)) * r);
+    float w = s.a * s.a * wr;                  // squared: half-known counts for little
+    sum += s.rgb * w;
+    wsum += w;
+  }
+}
 
 void main() {
   vec2 uv = vScreenUv;
   vec2 muv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, uMaskFlipY));
 
-  // Dilate and soften the mask a little. A hard silhouette edge reads as a
-  // cut-out; a soft one reads as the person not being there.
-  //
-  // 3x3 at a wide step rather than 5x5 at a narrow one: the mask is a low-res
-  // texture being magnified several times over, so there is no detail in there
-  // for the extra sixteen taps to find.
+  // Dilate a little, feather a lot. The segmenter's silhouette sits a touch
+  // inside the real one -- hair, a shoulder, a sleeve's edge -- and every pixel
+  // of person it leaves out is a dark contour against the wall, so the plate is
+  // painted past the mask's edge. But the feather has to be WIDE, and that
+  // means a wide kernel with the threshold in its middle: put the threshold
+  // near zero and alpha saturates the moment any tap touches the mask, which
+  // moves the cut to the kernel's own boundary and gives a hard, stepped edge.
   float m = 0.0;
-  vec2 spread = vec2(0.010, 0.010 * uAspect);
-  for (int i = -1; i <= 1; i++) {
-    for (int j = -1; j <= 1; j++) {
+  vec2 spread = vec2(0.009, 0.009 * uAspect);
+  for (int i = -2; i <= 2; i++) {
+    for (int j = -2; j <= 2; j++) {
       m += texture2D(uMask, muv + vec2(float(i), float(j)) * spread).r;
     }
   }
-  m /= 9.0;
-  float a = smoothstep(0.18, 0.62, m) * uAmount;
+  m /= 25.0;
+  float a = smoothstep(0.10, 0.55, m) * uAmount;
   if (a < 0.01) discard;
 
   vec2 puv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, uPlateFlipY));
   vec4 sharp = texture2D(uPlate, puv);
-  float conf = sharp.a;        // how many samples this pixel's mean is made of
+  float conf = sharp.a;
 
-  // Where we do not know what is behind them, do not say it sharply. Blurring
-  // does not make the pixel any less wrong -- it makes it wrong in the register
-  // the eye forgives: low-frequency wrongness reads as soft light, while
-  // high-frequency wrongness reads as a smear of the very person we were
-  // supposed to have removed.
-  //
-  // Note what this deliberately does NOT do: drop the alpha where confidence is
-  // low. That would leave the player partly visible exactly where the plate is
-  // worst, turning "wrong background" into "visible player" -- the one failure
-  // the whole effect cannot survive.
-  vec2 ring = vec2(0.022, 0.022 * uAspect);
-  vec3 wide = texture2D(uPlate, puv + vec2( ring.x, 0.0)).rgb
-            + texture2D(uPlate, puv + vec2(-ring.x, 0.0)).rgb
-            + texture2D(uPlate, puv + vec2(0.0,  ring.y)).rgb
-            + texture2D(uPlate, puv + vec2(0.0, -ring.y)).rgb;
-  vec3 col = mix(wide * 0.25, sharp.rgb, smoothstep(0.15, 0.55, conf));
+  // Where the plate does not know what is behind them -- which, for someone
+  // who has stood still since the page loaded, is exactly their own
+  // silhouette -- what it holds is a photograph of THEM, and blurring that
+  // only makes a ghost. Fill from the room around them instead: a wide,
+  // confidence-weighted average that ignores every pixel the plate is unsure
+  // of. On a wall that is the wall; on anything, it is at least not a person.
+  // Nearer rings weigh far more, so the fill follows the LOCAL surroundings --
+  // a wall's gradient, the edge of a shadow -- rather than averaging the whole
+  // room into one flat grey that reads as a cut-out.
+  vec3 sum = vec3(0.0);
+  float wsum = 0.0;
+  ring(puv, vec2(0.06, 0.06 * uAspect), 1.00, sum, wsum);
+  ring(puv, vec2(0.13, 0.13 * uAspect), 0.35, sum, wsum);
+  ring(puv, vec2(0.24, 0.24 * uAspect), 0.12, sum, wsum);
+  ring(puv, vec2(0.40, 0.40 * uAspect), 0.04, sum, wsum);
+  vec3 fill = wsum > 0.01 ? sum / wsum : sharp.rgb;
+  // Half-known is known enough: a pixel the plate has a handful of samples for
+  // is real background, and the fill is only for what it has never seen.
+  vec3 col = mix(fill, sharp.rgb, smoothstep(0.15, 0.60, conf));
 
   gl_FragColor = vec4(col, a);
 }`;
@@ -138,8 +154,8 @@ float fbm(vec2 p) {
 /** One billowing puff, 0..1 coverage. */
 float puff(vec2 d, float t, float size, float seed) {
   if (t <= 0.0 || t >= 1.0) return 0.0;
-  float grow = 0.34 + 0.95 * pow(t, 0.5);
-  d.y -= 0.26 * t * size;                    // gas rises as it expands
+  float grow = 0.34 + 1.05 * pow(t, 0.5);
+  d.y -= 0.34 * t * size;                    // gas rises as it expands
   float r = length(d) / max(size * grow, 1e-4);
   if (r > 1.3) return 0.0;
   float ang = atan(d.y, d.x);
@@ -162,19 +178,24 @@ void main() {
     float h = hash(vec2(fi, uSeed));
     float ang = fi * 2.39996 + uSeed * 6.283;   // golden angle: even spread, no clumping
     vec2 off = vec2(cos(ang), sin(ang) * 0.8) * (0.15 + 0.62 * h) * uSize;
-    float delay = fi * 0.055;                   // they burst outward in sequence
+    float delay = fi * 0.07;                    // they burst outward in sequence
     float t = clamp((uT - delay) / max(1.0 - delay, 0.25), 0.0, 1.0);
     // MAX, not a sum: overlapping lobes must not stack into a solid white slab
     cover = max(cover, puff(d0 - off, t, uSize * (0.42 + 0.48 * h), h * 9.0));
   }
 
   // A wide, faint haze on a slower clock, so gas is still hanging in the air
-  // after the burst itself has torn apart.
-  float haze = puff(d0, clamp(uT * 0.62, 0.0, 1.0), uSize * 1.5, uSeed * 4.0) * 0.45;
+  // after the burst itself has torn apart -- and a second, wider one slower
+  // still, the thin white air that drifts off last.
+  float haze = puff(d0, clamp(uT * 0.62, 0.0, 1.0), uSize * 1.6, uSeed * 4.0) * 0.55;
+  float air  = puff(d0, clamp(uT * 0.45, 0.0, 1.0), uSize * 2.3, uSeed * 7.0) * 0.30;
 
-  float a = clamp(max(cover, haze), 0.0, 1.0);
+  // Lobes are pushed past 1 before the clamp so their bodies are solid white
+  // rather than translucent, which is the difference between a cloud and a
+  // faint fog of overlapping circles.
+  float a = clamp(max(max(cover * 1.35, haze), air), 0.0, 1.0);
   if (a < 0.006) discard;
-  gl_FragColor = vec4(mix(vec3(0.74, 0.76, 0.80), vec3(1.0), cover * 0.8), a);
+  gl_FragColor = vec4(mix(vec3(0.86, 0.88, 0.92), vec3(1.0), cover * 0.95), a);
 }`;
 
 /* ------------------------------------------------------------ the jutsu */
@@ -312,7 +333,7 @@ export class Substitution {
     this.t = 0;
     const b = this.bounds || { cx: 0.5, cy: 0.55, w: 0.4, h: 0.8 };
     this.smokeU.uCenter.value.set(b.cx, 1 - b.cy);
-    this.smokeU.uSize.value = THREE.MathUtils.clamp(b.h * 0.52, 0.22, 0.52);
+    this.smokeU.uSize.value = THREE.MathUtils.clamp(b.h * 0.66, 0.28, 0.66);
     this.smokeU.uSeed.value = Math.random();
     this._fitRect(b, false);
     this._placeLog(b);

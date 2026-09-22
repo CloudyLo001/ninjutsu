@@ -22,7 +22,7 @@ export const PROFILE = IS_MOBILE
       plateWidth: 960,
       plateHeight: 540,
       maxPixelRatio: 1.5,
-      smokeLobes: 4,       // puffs in the substitution burst
+      smokeLobes: 6,       // puffs in the substitution burst
       bloomLevels: 2,      // fewer, smaller blur levels
       bloomDownscale: 3,   // and captured at a third of the canvas
       bladeGhosts: 0,      // the motion-blur copies trebled the blade draw cost
@@ -35,7 +35,7 @@ export const PROFILE = IS_MOBILE
       plateWidth: 1280,
       plateHeight: 720,
       maxPixelRatio: 2,
-      smokeLobes: 7,
+      smokeLobes: 10,
       bloomLevels: 3,
       bloomDownscale: 2,
       bladeGhosts: 2,

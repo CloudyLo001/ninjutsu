@@ -13,8 +13,8 @@ import { HandProxy } from './handproxy.js';
 // Sizes in centimetres. Hand-scale, not anime-scale: at a typical 30-50 cm
 // from a webcam the visible frame is only ~37-60 cm tall, so the real thing
 // would not fit. The size slider scales all of this.
-const CORE_R    = 6.45;    // ~12.9 cm across: half again wider than a palm
-const BLADE_R   = 14.25;
+const CORE_R    = 9.7;     // ~19 cm across at size 1: twice a palm width
+const BLADE_R   = 21.4;
 // Gap between the palm's skin and the underside of the ball, along the palm's
 // normal. The ball sits on the palm SIDE of the hand: in front of it when the
 // palm faces the camera, behind it when the back of the hand does, above it
@@ -561,7 +561,7 @@ export class Rasengan {
     // Clamped: past 1 the additive light just crushes the frame to white and
     // takes the blade silhouettes with it.
     u.uGlow.value += (Math.min(1, glow * g) - u.uGlow.value) * 0.3;
-    u.uGlowRadius.value = 0.42 * size;
+    u.uGlowRadius.value = 0.63 * size;   // scales with the effect
     if (this.state === 'ACTIVE') this.stage.setShake(0.04 + 0.015 * Math.sin(this.t * 40));
     else if (this.state !== 'EXPAND') this.stage.setShake(this.stage.shake * 0.85);
   }

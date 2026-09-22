@@ -14,6 +14,9 @@ import * as ui from './ui.js';
 import * as THREE from 'three';
 import { PROFILE, IS_MOBILE } from './device.js';
 
+// Where on the hand the Chidori sits: 0 = wrist, 1 = knuckle line.
+const CHIDORI_ALONG_PALM = 1.0;
+
 const app = {
   cv: null, stage: null, effect: null, clones: null,
   plate: null, subst: null,
@@ -130,7 +133,11 @@ async function begin() {
   // drops to one hand for a few frames fairly often. Without the grace period
   // the clones flicker out every time that happens.
   app.crossSign = new SignTrigger({ onAt: 0.50, offAt: 0.26, onFrames: 4, lostFrames: 20 });
-  app.ramSign = new SignTrigger({ onAt: 0.50, offAt: 0.30, onFrames: 4, lostFrames: 20 });
+  // Deliberately easier than the cross seal. Safe only because of the
+  // winner-takes-all step in onFrame: the two seals share every scoring term
+  // but the meet point, and near a meet of ~0.85 both are half-satisfied, so a
+  // low bar here would otherwise fire on a high-crossed X.
+  app.ramSign = new SignTrigger({ onAt: 0.36, offAt: 0.22, onFrames: 3, lostFrames: 20 });
 
   ui.initJutsuMenu({
     paper: app.palmSign.onAt,
@@ -219,16 +226,21 @@ function onFrame(frame) {
   // may fire -- a Rasenshuriken out of an empty room would break the trick.
   const away = !!app.subst?.hidden;
 
-  /* --- ram seal: substitution. Scored first: it is the only sign that locks
-     out the others. */
-  const ram = away ? 0 : ramScore(world, image, app.ramDbg);
+  /* --- the two two-handed seals, scored together. Ram (substitution) and
+     cross (clones) are the same hand shape and differ only in where the index
+     fingers meet, so whichever the hands are CLOSER to wins the frame and the
+     other is zeroed. That is what lets the ram bar sit low without a strongly
+     crossed X ever tripping it: a clear X scores ram ~0, and an ambiguous one
+     still scores cross higher. */
+  const ramRaw = away ? 0 : ramScore(world, image, app.ramDbg);
+  const crossRaw = away ? 0 : crossScore(world, image, app.crossDbg);
+  const ram = ramRaw > crossRaw ? ramRaw : 0;
   const rr = app.ramSign.update(ram, world.length >= 2);
   app.ramScoreV = rr.score;
   if (rr.changed && rr.active) app.subst?.fire();
 
-  /* --- cross sign: shadow clones. Scored before paper, because a hand held
-     in the two-finger shape must not also be read as an open palm. */
-  const cross = away || rr.active ? 0 : crossScore(world, image, app.crossDbg);
+  /* --- cross sign: shadow clones. Locked out while a substitution runs. */
+  const cross = rr.active ? 0 : (crossRaw > ramRaw ? crossRaw : 0);
   const cr = app.crossSign.update(cross, world.length >= 2);
   app.crossScoreV = cr.score;
   if (cr.changed && !app.forceClones) app.clones?.setActive(cr.active);
@@ -281,8 +293,11 @@ function onFrame(frame) {
   app.chidoriScoreV = cd.score;
 
   if (openL.handIndex >= 0 && image[openL.handIndex]) {
+    // Anchored at the knuckle line (1.0 = base of the fingers), not mid-palm:
+    // the knot sits where the fingers meet the hand and the arcs leave past
+    // the fingertips, rather than pooling in the cup of the palm.
     palmPose(image[openL.handIndex], world[openL.handIndex], frame.width, frame.height,
-             app.stage.camera, app.chidoriPose, 0.5, app.labels[openL.handIndex] === 'Right');
+             app.stage.camera, app.chidoriPose, CHIDORI_ALONG_PALM, app.labels[openL.handIndex] === 'Right');
     app.chidori.setHandSize(app.chidoriPose.palmCm);
     app.chidori.setPose(app.chidoriPose.position);
   }

@@ -6,10 +6,20 @@
 // with ridged noise, but it always reads as smoke lit blue -- the thing that
 // makes lightning look like lightning is hard straight runs meeting at sharp
 // angles, and that is a polyline, not a gradient. Each bolt is a ribbon: a
-// random walk outward from the palm, expanded sideways into a triangle strip
-// so it has controllable width, and re-rolled several times a second.
+// walk outward, expanded sideways into a triangle strip, re-rolled some thirty
+// times a second.
 //
-// Ribbon UVs carry both gradients the effect needs, for free:
+// Three kinds of bolt, because one kind never looks like a discharge:
+//   primary  long arcs thrown out from the knot in the palm
+//   branch   forks that leave a primary partway along it, shorter and finer
+//   spark    short crackles in and around the knot itself
+// and every bolt is intermittent -- a bolt that is always lit reads as a wire.
+//
+// The ribbons are hairline-thin on purpose. The white filament and its blue
+// rim are a few pixels wide; the broad blue aura around the whole thing is the
+// bloom pass's job, not the geometry's. Wide ribbons read as glowing tubes.
+//
+// Ribbon UVs carry both gradients the shader needs, for free:
 //   u  along the bolt   -> tapers the tip away
 //   v  across the bolt  -> white at the centreline, blue at the edges
 //
@@ -19,15 +29,14 @@
 
 import * as THREE from 'three';
 
-const BOLTS = 26;          // arcs radiating from the palm
-const SEGS = 9;            // kinks per arc
-const VERTS_PER_BOLT = (SEGS + 1) * 2;
+const PRIMARY = 22, BRANCH = 30, SPARK = 18;
+const SEGS = { primary: 10, branch: 6, spark: 4 };   // kinks per bolt
 
-const CORE_R = 6.8;        // cm, the bright knot in the palm
-const REACH = 48.0;        // cm, how far the longest arcs throw
+const CORE_R = 10.2;       // cm, the bright knot in the palm
+const REACH = 72.0;        // cm, how far the longest arcs throw
 const REF_PALM_CM = 9.0;
 
-const REGEN_MS = 45;       // how often the bolts are re-rolled
+const REGEN_MS = 32;       // how often the bolts are re-rolled
 const T_CHARGE = 0.22, T_OUT = 0.22;
 
 const FOLLOW = 58;
@@ -54,19 +63,18 @@ void main() {
   // Across the ribbon: 0 on the centreline, 1 at the edges.
   float edge = abs(vUv.y - 0.5) * 2.0;
 
-  // A hot white filament inside a broad blue sheath. Two separate falloffs
-  // rather than one gradient, and the white is deliberately the NARROWER of
-  // the two: widen it and the arc goes pale and swallows its own blue. More
-  // white comes from driving this one harder, not from spreading it.
-  float core = 1.0 - smoothstep(0.0, 0.30, edge);
-  float sheath = pow(1.0 - smoothstep(0.08, 1.0, edge), 1.35);
+  // A hairline white filament with a blue rim. The ribbon is thin, so both
+  // are a few pixels; the white is driven hard rather than widened, because
+  // widening it turns the bolt pale and swallows its own blue.
+  float core = 1.0 - smoothstep(0.0, 0.38, edge);
+  float rim = 1.0 - smoothstep(0.20, 1.0, edge);
 
-  vec3 col = mix(vec3(0.12, 0.46, 1.0), vec3(1.0, 1.0, 1.0), core);
+  vec3 col = mix(vec3(0.16, 0.50, 1.0), vec3(1.0, 1.0, 1.0), core);
 
-  // Tip fade: arcs thin out and die rather than stopping dead.
-  float along = 1.0 - smoothstep(0.58, 1.0, vUv.x);
+  // Tip fade: bolts thin out and die rather than stopping dead.
+  float along = 1.0 - smoothstep(0.60, 1.0, vUv.x);
 
-  float a = (core * 2.10 + sheath * 1.25) * along * vI * uEnergy * uGain;
+  float a = (core * 2.2 + rim * 0.9) * along * vI * uEnergy * uGain;
   if (a < 0.004) discard;
   gl_FragColor = vec4(col * a, a);      // premultiplied, for additive blending
 }`;
@@ -90,25 +98,40 @@ export class Chidori {
     this.group.visible = false;
     stage.scene.add(this.group);
 
-    /* ---- bolt ribbons ------------------------------------------------- */
+    /* ---- bolt table and ribbons ---------------------------------------- */
 
-    const vCount = BOLTS * VERTS_PER_BOLT;
+    // One record per bolt with its slice of the shared buffers and its own
+    // centreline, which the branches read to find where to fork from.
+    this.table = [];
+    let vCount = 0, iCount = 0;
+    const add = (kind, count) => {
+      for (let n = 0; n < count; n++) {
+        const segs = SEGS[kind];
+        this.table.push({ kind, segs, v0: vCount, i0: iCount,
+                          cx: new Float32Array(segs + 1), cy: new Float32Array(segs + 1) });
+        vCount += (segs + 1) * 2;
+        iCount += segs * 6;
+      }
+    };
+    add('primary', PRIMARY);   // primaries first: branches fork off them
+    add('branch', BRANCH);
+    add('spark', SPARK);
+
     this.pos = new Float32Array(vCount * 3);
     const uv = new Float32Array(vCount * 2);
     this.inten = new Float32Array(vCount);
-    const index = new Uint16Array(BOLTS * SEGS * 6);
+    const index = new Uint16Array(iCount);
 
     // Topology and UVs never change -- only the vertex positions are re-rolled,
     // so the index buffer is uploaded exactly once.
-    for (let b = 0; b < BOLTS; b++) {
-      const base = b * VERTS_PER_BOLT;
-      for (let i = 0; i <= SEGS; i++) {
-        const u = i / SEGS;
-        uv[(base + i * 2) * 2] = u;       uv[(base + i * 2) * 2 + 1] = 0;
-        uv[(base + i * 2 + 1) * 2] = u;   uv[(base + i * 2 + 1) * 2 + 1] = 1;
+    for (const b of this.table) {
+      for (let i = 0; i <= b.segs; i++) {
+        const u = i / b.segs, v = b.v0 + i * 2;
+        uv[v * 2] = u;           uv[v * 2 + 1] = 0;
+        uv[(v + 1) * 2] = u;     uv[(v + 1) * 2 + 1] = 1;
       }
-      for (let i = 0; i < SEGS; i++) {
-        const o = (b * SEGS + i) * 6, v = base + i * 2;
+      for (let i = 0; i < b.segs; i++) {
+        const o = b.i0 + i * 6, v = b.v0 + i * 2;
         index[o] = v; index[o + 1] = v + 1; index[o + 2] = v + 2;
         index[o + 3] = v + 1; index[o + 4] = v + 3; index[o + 5] = v + 2;
       }
@@ -123,9 +146,9 @@ export class Chidori {
     geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geo.setAttribute('aI', this.intenAttr);
     geo.setIndex(new THREE.BufferAttribute(index, 1));
-    // The bolts are re-rolled constantly and always sit within REACH of the
-    // palm, so a fixed sphere is both correct and cheaper than recomputing it.
-    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), REACH * 1.2);
+    // Re-rolled constantly and always within REACH of the palm, so a fixed
+    // sphere is both correct and cheaper than recomputing it.
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), REACH * 1.3);
 
     this.uniforms = { uEnergy: { value: 0 }, uGain: { value: 1 } };
     this.bolts = new THREE.Mesh(geo, new THREE.ShaderMaterial({
@@ -151,14 +174,15 @@ export class Chidori {
       this.group.add(s);
       return s;
     };
-    // White at the centre, blue spreading out of it -- the same relationship the
-    // bolts have, so the knot reads as the place they are all coming from.
-    this.hot = mkGlow(CORE_R * 2.3, 1.00, 0xffffff, 3);
-    this.halo = mkGlow(CORE_R * 7.0, 0.60, 0x3f8cff, 1);
+    // White at the centre, blue spreading out of it -- the same relationship
+    // the bolts have, so the knot reads as the place they all come from. Kept
+    // modest now that the sparks supply the crackle in the middle.
+    this.hot = mkGlow(CORE_R * 1.6, 0.85, 0xffffff, 3);
+    this.halo = mkGlow(CORE_R * 6.0, 0.55, 0x3f8cff, 1);
     // A broad blue wash under everything, out past the ends of the arcs. This
     // is what makes the whole hand look like it is inside the discharge rather
     // than merely next to it.
-    this.wash = mkGlow(REACH * 2.2, 0.34, 0x1b62ff, 0);
+    this.wash = mkGlow(REACH * 1.8, 0.30, 0x1b62ff, 0);
 
     this._pos = new THREE.Vector3();
     this._target = new THREE.Vector3();
@@ -196,56 +220,85 @@ export class Chidori {
 
   get active() { return this.state !== 'IDLE'; }
 
-  /**
-   * Re-roll every bolt.
-   *
-   * Each is a walk outward whose heading is nudged at every kink, never
-   * reversed -- a true random walk doubles back on itself and reads as a
-   * scribble. Width tapers along the run so the arcs sharpen as they reach.
-   */
+  /** Re-roll every bolt. Primaries first, so the branches have arcs to leave. */
   _regen(grow) {
-    const P = this.pos, I = this.inten;
-    for (let b = 0; b < BOLTS; b++) {
-      const base = b * VERTS_PER_BOLT;
+    const R = REACH * grow, r0 = CORE_R * 0.3 * grow, rnd = Math.random;
+    const primaries = [];
 
-      // Spread the arcs around the palm, then jitter, so they are neither
-      // evenly spaced (which reads as a wheel) nor clumped.
-      let ang = (b / BOLTS) * Math.PI * 2 + (Math.random() - 0.5) * 0.55;
-      const reach = REACH * (0.32 + Math.random() * 0.85) * grow;
-      // Much wider than a real bolt would be, because the ribbon has to carry
-      // the blue sheath as well as the white filament; at hairline width there
-      // are no pixels left for the blue to occupy.
-      const w0 = (2.3 + Math.random() * 2.6) * grow;
-      const intensity = 0.45 + Math.random() * 0.55;
-
-      let r = CORE_R * 0.35;
-      let px = Math.cos(ang) * r, py = Math.sin(ang) * r;
-
-      for (let i = 0; i <= SEGS; i++) {
-        const k = i / SEGS;
-        // Heading wanders more as the arc gets further from the palm.
-        ang += (Math.random() - 0.5) * (0.55 + 1.15 * k);
-        const step = (reach / SEGS) * (0.6 + Math.random() * 0.9);
-        const nx = px + Math.cos(ang) * step;
-        const ny = py + Math.sin(ang) * step;
-
-        // Perpendicular to the direction of travel, for the ribbon's width.
-        let dx = nx - px, dy = ny - py;
-        const len = Math.hypot(dx, dy) || 1e-4;
-        dx /= len; dy /= len;
-        const w = w0 * (1 - k * 0.72);
-
-        const v = (base + i * 2) * 3;
-        P[v]     = px - dy * w; P[v + 1] = py + dx * w; P[v + 2] = 0;
-        P[v + 3] = px + dy * w; P[v + 4] = py - dx * w; P[v + 5] = 0;
-        I[base + i * 2] = intensity;
-        I[base + i * 2 + 1] = intensity;
-
-        px = nx; py = ny;
+    for (const b of this.table) {
+      let x, y, ang, reach, w0, wLo, wHi, inten;
+      if (b.kind === 'primary') {
+        // Spread around the palm, then jittered: neither evenly spaced, which
+        // reads as a wheel, nor clumped.
+        ang = (primaries.length / PRIMARY) * Math.PI * 2 + (rnd() - 0.5) * 0.6;
+        x = Math.cos(ang) * r0; y = Math.sin(ang) * r0;
+        reach = R * (0.35 + rnd() * 0.65);
+        w0 = (0.9 + rnd() * 0.8) * grow;
+        wLo = 0.45; wHi = 1.15;
+        inten = 0.55 + rnd() * 0.45;
+        primaries.push(b);
+      } else if (b.kind === 'branch') {
+        // Leave a primary partway along, veering off its local heading.
+        const p = primaries[(rnd() * primaries.length) | 0];
+        const j = 1 + ((rnd() * (p.segs - 2)) | 0);
+        x = p.cx[j]; y = p.cy[j];
+        const dir = Math.atan2(p.cy[j] - p.cy[j - 1], p.cx[j] - p.cx[j - 1]);
+        ang = dir + (rnd() < 0.5 ? -1 : 1) * (0.45 + rnd() * 0.8);
+        reach = R * (0.15 + rnd() * 0.30);
+        w0 = (0.5 + rnd() * 0.4) * grow;
+        wLo = 0.6; wHi = 1.3;
+        inten = 0.4 + rnd() * 0.5;
+      } else {
+        // Short crackles in and around the knot, any direction.
+        const a = rnd() * Math.PI * 2, rr = CORE_R * grow * (0.25 + rnd() * 1.0);
+        x = Math.cos(a) * rr; y = Math.sin(a) * rr;
+        ang = rnd() * Math.PI * 2;
+        reach = R * (0.05 + rnd() * 0.12);
+        w0 = (0.4 + rnd() * 0.35) * grow;
+        wLo = 1.0; wHi = 1.8;
+        inten = 0.5 + rnd() * 0.5;
       }
+      // Intermittent. Most bolts are lit most frames; some drop out, and the
+      // whole pattern pulses the way a discharge does.
+      if (rnd() < 0.18) inten *= 0.08;
+      this._walk(b, x, y, ang, reach, w0, wLo, wHi, inten);
     }
     this.posAttr.needsUpdate = true;
     this.intenAttr.needsUpdate = true;
+  }
+
+  /**
+   * One bolt: a walk whose heading is nudged at every kink -- never reversed,
+   * a true random walk doubles back and reads as a scribble -- with the odd
+   * hard corner thrown in, then a ribbon around it that tapers to the tip.
+   */
+  _walk(b, px, py, ang, reach, w0, wLo, wHi, inten) {
+    const P = this.pos, I = this.inten, n = b.segs, rnd = Math.random;
+
+    b.cx[0] = px; b.cy[0] = py;
+    for (let i = 1; i <= n; i++) {
+      const k = i / n;
+      ang += (rnd() - 0.5) * (wLo + (wHi - wLo) * k);
+      // Real lightning has hard corners, not a smooth wander.
+      if (rnd() < 0.14) ang += (rnd() < 0.5 ? -1 : 1) * (0.55 + rnd() * 0.7);
+      const step = (reach / n) * (0.4 + rnd() * 1.2);
+      b.cx[i] = b.cx[i - 1] + Math.cos(ang) * step;
+      b.cy[i] = b.cy[i - 1] + Math.sin(ang) * step;
+    }
+
+    for (let i = 0; i <= n; i++) {
+      // Perpendicular to the local direction of travel, for the ribbon width.
+      const a = Math.max(0, i - 1), c = Math.min(n, i + 1);
+      let dx = b.cx[c] - b.cx[a], dy = b.cy[c] - b.cy[a];
+      const len = Math.hypot(dx, dy) || 1e-4;
+      dx /= len; dy /= len;
+      const w = w0 * (1 - (i / n) * 0.85);
+      const v = (b.v0 + i * 2) * 3;
+      P[v]     = b.cx[i] - dy * w; P[v + 1] = b.cy[i] + dx * w; P[v + 2] = 0;
+      P[v + 3] = b.cx[i] + dy * w; P[v + 4] = b.cy[i] - dx * w; P[v + 5] = 0;
+      I[b.v0 + i * 2] = inten;
+      I[b.v0 + i * 2 + 1] = inten;
+    }
   }
 
   update(dt) {
@@ -285,9 +338,9 @@ export class Chidori {
     this.group.position.copy(this._pos);
     this.group.scale.setScalar(this.handScale * (this.tuning.size ?? 1));
 
-    this.hot.material.opacity = Math.min(1.0, 1.00 * this.energy * g);
-    this.halo.material.opacity = Math.min(1.0, 0.60 * this.energy * g);
-    this.wash.material.opacity = Math.min(0.8, 0.34 * this.energy * g);
+    this.hot.material.opacity = Math.min(1.0, 0.85 * this.energy * g);
+    this.halo.material.opacity = Math.min(1.0, 0.55 * this.energy * g);
+    this.wash.material.opacity = Math.min(0.8, 0.30 * this.energy * g);
 
     // A hard, fast rattle rather than the Rasenshuriken's slow rumble.
     this.stage.setShake(0.05 + 0.03 * Math.abs(Math.sin(this.t * 47)));
@@ -302,7 +355,7 @@ export class Chidori {
       (p.y / (tanHalf * d)) * 0.5 + 0.5,
     );
     u.uGlowColor.value.setHex(0x6fa8ff);
-    u.uGlowRadius.value = 0.40 * this.handScale;
+    u.uGlowRadius.value = 0.60 * this.handScale;
     u.uGlow.value += (0.62 * this.energy - u.uGlow.value) * 0.35;
   }
 
