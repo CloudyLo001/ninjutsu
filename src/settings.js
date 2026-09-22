@@ -28,6 +28,7 @@ export const DEFAULTS = {
   bladeWhite: 0.45,   // how white-hot the shuriken blades burn, 0..1.5
   deviceId: null,     // camera deviceId, null = browser default
   debug: false,
+  muted: false,       // jutsu sound effects off
 };
 
 const listeners = new Set();

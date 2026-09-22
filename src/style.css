@@ -240,6 +240,24 @@ input[type=range] { cursor: pointer; }
 }
 #jutsu-btn:hover { background: rgba(0,0,0,.78); }
 
+/* ---------------------------------------------------------------- mute */
+
+#mute-btn {
+  position: fixed;
+  right: 120px; bottom: 16px;
+  z-index: 30;
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.2);
+  background: rgba(0,0,0,.55);
+  color: var(--paper);
+  font-size: 17px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+#mute-btn:hover { background: rgba(0,0,0,.78); }
+#mute-btn[aria-pressed="true"] { opacity: .6; }
+
 #jutsu-panel {
   position: fixed;
   right: 16px; bottom: 72px;
@@ -359,9 +377,10 @@ input[type=range] { cursor: pointer; }
     -webkit-overflow-scrolling: touch;
   }
 
-  #jutsu-btn, #settings-btn { width: 50px; height: 50px; bottom: 14px; }
+  #jutsu-btn, #settings-btn, #mute-btn { width: 50px; height: 50px; bottom: 14px; }
   #settings-btn { right: 14px; }
   #jutsu-btn { right: 72px; }
+  #mute-btn { right: 130px; }
 
   /* the HUD ring competes with the effect for space on a small screen */
   #ring-wrap { left: 14px; bottom: 14px; width: 82px; height: 82px; }

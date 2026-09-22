@@ -10,6 +10,6 @@
 
 export const ASSETS = {
   rasenshuriken: 'https://cdn.mint.gg/glb/cyan-core-spiral-vortex-normalized-196a6a59562ed0b6.glb',
-  substitutionLog: 'https://cdn.mint.gg/glb/kunai-studded-substitution-log-normalized-e0851b497a8fe012.glb',
+  substitutionLog: 'https://cdn.mint.gg/glb/olive-kunai-logwerp-normalized-b6a7fc7b5ec3bc62.glb',   // "Olive Kunai Logwerp"
   mockFrame: 'https://cdn.mint.gg/images/xn7243dd5j5vn8ygqmhamv9vtn8egec3/mock-webcam-test-frame-a63c10-5e98121900be319c.png',
 };

@@ -248,9 +248,18 @@ export class SignTrigger {
     this.offFrames = opts.offFrames ?? 6;
     this.lostFrames = opts.lostFrames ?? 8;
     this.smooth = opts.smooth ?? 0.5;
+    // Asymmetric on purpose. Opening a hand is where false triggers live, so
+    // the score climbs through the usual smoothing; closing one is deliberate,
+    // and the score is allowed to fall almost as fast as the raw value does.
+    this.smoothDown = opts.smoothDown ?? this.smooth;
+    // MediaPipe often drops a hand in the act of closing. If the score was
+    // already falling when the hand vanished, that is a fist, not a glitch,
+    // and it is released after this many frames instead of lostFrames.
+    this.lostFastFrames = opts.lostFastFrames ?? this.lostFrames;
     this.s = 0;
     this.active = false;
     this._above = 0; this._below = 0; this._lost = 0;
+    this._falling = false;
   }
 
   /** @returns {{active:boolean, score:number, changed:boolean}} */
@@ -259,10 +268,14 @@ export class SignTrigger {
     if (!present) {
       this._lost++;
       this.s *= 0.7;
-      if (this._lost >= this.lostFrames) { this.active = false; this._above = 0; }
+      const limit = this._falling ? this.lostFastFrames : this.lostFrames;
+      if (this._lost >= limit) { this.active = false; this._above = 0; }
     } else {
       this._lost = 0;
-      this.s = (1 - this.smooth) * this.s + this.smooth * raw;
+      const k = raw < this.s ? this.smoothDown : this.smooth;
+      const prev = this.s;
+      this.s = (1 - k) * this.s + k * raw;
+      this._falling = this.active && this.s < prev - 0.04;
       if (!this.active) {
         this._above = this.s > this.onAt ? this._above + 1 : 0;
         if (this._above >= this.onFrames) { this.active = true; this._below = 0; }

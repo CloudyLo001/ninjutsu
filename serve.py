@@ -5,8 +5,9 @@ Plain `python -m http.server` lets the browser cache ES modules, so edits to
 src/*.js silently do not take effect on reload. This sends no-store for
 everything, which is what you want while iterating.
 
-    python serve.py [port]        # default 8123
+    python serve.py [port]        # default $PORT, else 8123
 """
+import os
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
@@ -33,7 +34,8 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8123
+    # argv wins, then the PORT the preview tool assigns, then the default
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get('PORT', 8123))
     print(f'Kon Summon dev server: http://localhost:{port}')
     print(f'  mock camera (no webcam needed): http://localhost:{port}/?mock=1')
     ThreadingHTTPServer(('127.0.0.1', port), NoCacheHandler).serve_forever()

@@ -13,6 +13,7 @@ import * as settings from './settings.js';
 import * as ui from './ui.js';
 import * as THREE from 'three';
 import { PROFILE, IS_MOBILE } from './device.js';
+import { Sfx } from './audio.js';
 
 // Where on the hand the Chidori sits: 0 = wrist, 1 = knuckle line.
 const CHIDORI_ALONG_PALM = 1.0;
@@ -26,7 +27,9 @@ const app = {
   score: 0, crossScoreV: 0, running: false,
   maskTex: null, maskVersion: -1, bounds: null,
   crossDbg: {}, ramDbg: {}, ramScoreV: 0, forceClones: false, sides: [],
+  sfx: new Sfx(),
   offs: Array.from({ length: 21 }, () => new THREE.Vector3()), heldSide: null, debugView: 0,
+  renderDivider: 1, renderDividerLock: false,   // see renderLoop
 };
 
 const video = document.getElementById('cam');
@@ -36,6 +39,9 @@ const stageEl = document.getElementById('stage');
 /* ------------------------------------------------------------------ boot */
 
 async function begin() {
+  // The click that starts the camera is also the gesture that lets audio play.
+  app.sfx.setMuted(settings.get().muted);
+  app.sfx.unlock();
   ui.showScreen('loading');
   const wanted = settings.get().deviceId;
   try {
@@ -127,8 +133,12 @@ async function begin() {
   // keeps the ball burning while the fingers close around it and lets it go
   // only on a fist -- offAt already IS the hold threshold. lostFrames is up
   // because a cupped hand self-occludes and MediaPipe drops it more often.
-  app.palmSign = new SignTrigger({ onAt: 0.72, offAt: 0.12, lostFrames: 12 });
-  app.chidoriSign = new SignTrigger({ onAt: 0.72, offAt: 0.42 });
+  // Release is tuned for snap: two frames below the threshold, the score
+  // falling nearly as fast as the raw value, and a hand that vanishes while
+  // closing counts as closed after three frames.
+  const snap = { offFrames: 2, smoothDown: 0.85, lostFastFrames: 3 };
+  app.palmSign = new SignTrigger({ onAt: 0.72, offAt: 0.12, lostFrames: 12, ...snap });
+  app.chidoriSign = new SignTrigger({ onAt: 0.72, offAt: 0.42, ...snap });
   // lostFrames is generous: crossed hands occlude each other, and MediaPipe
   // drops to one hand for a few frames fairly often. Without the grace period
   // the clones flicker out every time that happens.
@@ -214,6 +224,7 @@ function uploadMask(mask) {
 /* ------------------------------------------------------------ frame loop */
 
 function onFrame(frame) {
+  balanceRender();
   app.latest = frame;
   const world = frame.hands?.worldLandmarks || [];
   const image = frame.hands?.landmarks || [];
@@ -237,13 +248,16 @@ function onFrame(frame) {
   const ram = ramRaw > crossRaw ? ramRaw : 0;
   const rr = app.ramSign.update(ram, world.length >= 2);
   app.ramScoreV = rr.score;
-  if (rr.changed && rr.active) app.subst?.fire();
+  if (rr.changed && rr.active && app.subst?.fire()) app.sfx.play('substitution');
 
   /* --- cross sign: shadow clones. Locked out while a substitution runs. */
   const cross = rr.active ? 0 : (crossRaw > ramRaw ? crossRaw : 0);
   const cr = app.crossSign.update(cross, world.length >= 2);
   app.crossScoreV = cr.score;
-  if (cr.changed && !app.forceClones) app.clones?.setActive(cr.active);
+  if (cr.changed && !app.forceClones) {
+    app.clones?.setActive(cr.active);
+    if (cr.active) app.sfx.play('clones');
+  }
 
   /* --- paper sign: Rasenshuriken, on one nominated hand */
   // 'unknown' is allowed through deliberately: if handedness is ever missing
@@ -275,6 +289,7 @@ function onFrame(frame) {
   if (pr.changed) {
     app.effect.setActive(pr.active);
     app.heldSide = pr.active && open.handIndex >= 0 ? app.sides[open.handIndex] : null;
+    if (pr.active) app.sfx.play('rasengan');
   }
 
   /* --- the SAME open palm, on the other hand: Chidori.
@@ -301,7 +316,10 @@ function onFrame(frame) {
     app.chidori.setHandSize(app.chidoriPose.palmCm);
     app.chidori.setPose(app.chidoriPose.position);
   }
-  if (cd.changed) app.chidori.setActive(cd.active);
+  if (cd.changed) {
+    app.chidori.setActive(cd.active);
+    if (cd.active) app.sfx.play('chidori');
+  }
 
   // Run the segmenter only while clones are on screen -- it is the most
   // expensive model here and idle most of the time.
@@ -313,12 +331,49 @@ function onFrame(frame) {
 }
 
 let lastT = performance.now();
+let rafCount = 0;
 function renderLoop(now) {
   if (!app.running) return;
+  requestAnimationFrame(renderLoop);
+  // Share the GPU with the tracker. Hand tracking runs in a worker on the
+  // same GPU, and on an integrated one the two starve each other: rendering
+  // at 60 left the tracker at 5 Hz. When inference is slow, every other
+  // display frame is skipped -- the effects still move on a steady 30 fps
+  // clock, which reads far smoother than 60 fps driven by a hand that is
+  // updated five times a second. Strong GPUs never trip this.
+  if ((rafCount++ % app.renderDivider) !== 0) return;
   const dt = Math.min(0.064, (now - lastT) / 1000);
   lastT = now;
   stepFrame(now, dt);
-  requestAnimationFrame(renderLoop);
+}
+
+// Hysteresis on the tracker's own timing, so it settles rather than flaps.
+const starve = [];               // recent inference times while an effect was drawing
+function balanceRender() {
+  if (!app.cv || app.cv.stats.backend !== 'worker' || app.renderDividerLock) return;
+  const ms = app.cv.stats.handMs;
+  if (app.renderDivider === 1 && ms > 80) app.renderDivider = 2;
+  else if (app.renderDivider === 2 && ms < 40) app.renderDivider = 1;
+
+  // Some GPUs cannot serve two contexts at once: even at half rate the
+  // tracker stays starved, and a jutsu that follows the hand at 6 Hz is worse
+  // than a little jank. Once that is established (from frames drawn WITH an
+  // effect up, since an idle frame never shows it), fall back to tracking on
+  // the main thread -- at a quiet moment, because the switch reloads the
+  // model and would drop a running jutsu.
+  if (app.renderDivider !== 2) return;
+  if (app.effect?.group.visible || app.chidori?.group.visible) {
+    starve.push(ms);
+    if (starve.length > 40) starve.shift();
+  }
+  if (starve.length < 40) return;
+  const median = [...starve].sort((a, b) => a - b)[20];
+  const busy = app.effect?.active || app.chidori?.active || app.subst?.active || app.clones?.active;
+  if (median > 120 && !busy && !app.cvSwitching) {
+    app.cvSwitching = true;
+    app.renderDivider = 1;
+    app.cv.switchToInline(`median ${median.toFixed(0)} ms with effects up`).finally(() => { app.cvSwitching = false; });
+  }
 }
 
 function stepFrame(now, dt) {
@@ -357,7 +412,8 @@ function stepFrame(now, dt) {
     const s = app.cv?.stats, p = app.pose, d = app.crossDbg, r = app.ramDbg;
     const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '-');
     ui.setDebug(
-      `fps      ${s?.fps ?? 0}\n` +
+      `fps      ${s?.fps ?? 0}  (${s?.backend ?? '?'}${s?.delegate ? ' ' + s.delegate : ''}, render /${app.renderDivider})
+` +
       `hands    ${(s?.handMs ?? 0).toFixed(1)} ms  (${app.latest?.hands?.landmarks?.length ?? 0} found)\n` +
       `paper    ${app.score.toFixed(3)} (${app.palmSign?.active ? 'ON' : 'off'})  ` +
         `want ${settings.get().rasenganHand}  saw [${(app.sides || []).join(', ') || '-'}]\n` +
@@ -412,7 +468,7 @@ window.__rasReset = (...keys) => {
 // Manual stepper for the ?mock= harness, where requestAnimationFrame may be
 // throttled (background or non-rendering tab).
 if (new URLSearchParams(location.search).has('mock')) {
-  window.__rasStep = (dt = 16) => { app.cv?._tick(video); stepFrame(performance.now(), dt / 1000); };
+  window.__rasStep = async (dt = 16) => { await app.cv?.tickOnce(video); stepFrame(performance.now(), dt / 1000); };
 }
 
 // Press C to force the clones on or off. Separates "the sign is not being
@@ -473,6 +529,8 @@ ui.on('devicePicked', (deviceId) => {
 });
 
 ui.on('settingsOpened', () => listCameras().then((d) => ui.fillDevices(d, settings.get().deviceId)));
+ui.on('muteToggled', () => settings.set({ muted: !settings.get().muted }));
+ui.setMuted(settings.get().muted);
 
 settings.onChange((s, patch) => {
   // The palm sign may be held when the nominated hand changes; drop it rather
@@ -494,6 +552,7 @@ settings.onChange((s, patch) => {
   if ('chidoriSize' in patch && app.chidori) app.chidori.tuning.size = s.chidoriSize;
   if ('bladeWhite' in patch && app.effect) app.effect.tuning.bladeWhite = s.bladeWhite;
   if ('debug' in patch && !s.debug) ui.setDebug(null);
+  if ('muted' in patch) { app.sfx.setMuted(s.muted); ui.setMuted(s.muted); }
 });
 
 document.addEventListener('visibilitychange', () => {

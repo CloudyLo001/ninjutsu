@@ -18,17 +18,25 @@ const LOG_URL = ASSETS.substitutionLog;
 
 // Timeline, in seconds from the trigger.
 const T_VANISH  = 0.24;   // you are hidden by the time the smoke peaks
-const T_LOG_IN  = 0.10;   // log launches just after the burst
-const T_LOG_OUT = 1.25;   // and is gone below frame by here
+const T_LOG_IN  = 0.10;   // log pops up just after the burst
+const T_LOG_OUT = 1.65;   // and has dropped out of frame by here
 const T_RETURN  = 4.60;   // fade back starts
 const T_END     = 5.00;
 
 const LOG_DEPTH_CM = 95;  // roughly body distance; hands sit much closer
+const LOG_POP_CM  = 24;   // how high the log pops above where you stood
+const LOG_DROP_CM = 210;  // and how far it falls: well below the bottom edge
+// The log's flight, as fractions of T_LOG_IN..T_LOG_OUT: an ease-out rise, a
+// beat hanging at the top, then a straight gravity drop. No tumbling -- it
+// appears, and then it falls, the way the thing you swapped with would.
+const LOG_RISE_END = 0.26, LOG_HOLD_END = 0.50;
+// The gas over the log outlives the log itself by this much, thinning as it goes.
+const LOG_GAS_TAIL = 0.7;
 
 // How long the burst lasts. Outlives the log's flight (T_LOG_OUT) on purpose,
 // so the gas is still clearing as the log drops away rather than the two
 // finishing together and the frame going abruptly empty.
-const SMOKE_SPAN = 2.3;
+const SMOKE_SPAN = 2.6;
 
 /* -------------------------------------------------------------- shaders */
 
@@ -119,9 +127,17 @@ void main() {
   gl_FragColor = vec4(col, a);
 }`;
 
-// The burst. Several puffs rather than one, because a single expanding blob
-// reads as a circle wiping outward -- what makes smoke look like smoke is
-// separate lobes billowing at slightly different sizes, times and rates.
+// The gas. One mass of vapour that swells, churns and thins -- not a burst.
+//
+// The first version launched a ring of puffs outward in sequence, and the eye
+// read exactly that: shots leaving a centre, a white firework. What makes gas
+// look like gas is the opposite in every particular: the lobes sit close in
+// and DRIFT apart as the cloud grows, so it reads as one swelling mass; the
+// surface rolls (the noise that shapes each lobe is advected upward and warps
+// the lobe's own outline, so the edge billows instead of scaling up frozen);
+// the cloud dies from its thin edges inward (an erosion threshold that rises
+// over its life) rather than fading uniformly; and it is shaded, cauliflower
+// highlights on top and grey in the folds, instead of being flat white.
 //
 // Built per device: the lobe count has to be a compile-time constant for the
 // loop, and it is the one knob that decides how expensive this shader is.
@@ -131,7 +147,9 @@ uniform float uT;
 uniform vec2  uCenter;
 uniform float uAspect;
 uniform float uSize;
-uniform float uSeed;     // varies the burst so two substitutions differ
+uniform float uSeed;     // varies the cloud so two substitutions differ
+uniform float uDensity;  // 1 for the burst; less for the wisps over the log
+uniform float uPass;     // 1 on the canvas, 0 in the bloom capture: gas does not glow
 varying vec2 vUv;
 
 const int LOBES = ${lobes};
@@ -143,64 +161,74 @@ float noise(vec2 p) {
   return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
              mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
-// Three octaves, not four: this now runs twice per LOBE rather than twice per
-// pixel, so the octave count is multiplied by however many puffs there are.
+// Three octaves: this runs twice per LOBE, so the octave count is multiplied
+// by however many lobes there are.
 float fbm(vec2 p) {
   float v = 0.0, a = 0.5;
   for (int i = 0; i < 3; i++) { v += a * noise(p); p *= 2.05; a *= 0.5; }
   return v;
 }
 
-/** One billowing puff, 0..1 coverage. */
-float puff(vec2 d, float t, float size, float seed) {
-  if (t <= 0.0 || t >= 1.0) return 0.0;
-  float grow = 0.34 + 1.05 * pow(t, 0.5);
-  d.y -= 0.34 * t * size;                    // gas rises as it expands
-  float r = length(d) / max(size * grow, 1e-4);
-  if (r > 1.3) return 0.0;
-  float ang = atan(d.y, d.x);
-  float edge = 0.60 + 0.46 * fbm(vec2(cos(ang), sin(ang)) * 3.2 + seed + t * 1.3);
-  float body = smoothstep(edge, edge * 0.32, r);
-  body *= 0.50 + 0.85 * fbm(d * 6.5 / max(size, 1e-4) + seed * 3.1 + t * 1.7);
-  float life = (1.0 - smoothstep(0.52, 1.0, t)) * smoothstep(0.0, 0.07, t);
-  return clamp(body, 0.0, 1.0) * life;
+/** One lobe of the cloud, 0..1 density, soft-edged and rolling. */
+float lobe(vec2 d, float t, float size, float seed) {
+  float grow = 0.45 + 0.75 * pow(t, 0.55);
+  d.y -= 0.22 * t * size;                    // gas rises, slowly
+  vec2 q = d / max(size * grow, 1e-4);
+  if (dot(q, q) > 2.6) return 0.0;
+  // Domain warp: the outline is pushed around by a noise field that drifts
+  // upward through it, which is what makes the surface churn.
+  float w = fbm(q * 1.9 + seed + vec2(0.0, -t * 1.1));
+  q += (w - 0.5) * 0.7;
+  float body = smoothstep(1.0, 0.25, length(q));
+  body *= 0.55 + 0.6 * fbm(q * 3.5 + seed * 2.0 + vec2(t * 0.6, -t * 0.9));
+  return clamp(body, 0.0, 1.0);
 }
 
 void main() {
   vec2 d0 = (vUv - uCenter) * vec2(uAspect, 1.0);
-  // The cluster can never reach past this, and the quad is fullscreen, so one
+  // The cloud can never reach past this, and the quad is fullscreen, so one
   // cheap test discards most of the screen before any noise is evaluated.
-  if (length(d0) > uSize * 3.2) discard;
+  if (uPass < 0.5 || length(d0) > uSize * 3.2) discard;
 
-  float cover = 0.0;
+  float dens = 0.0;
+  // Lobes start packed near the centre and drift apart as the cloud grows:
+  // one mass swelling, not a ring of shots.
+  float spread = 0.12 + 0.55 * pow(uT, 0.6);
   for (int i = 0; i < LOBES; i++) {
     float fi = float(i);
     float h = hash(vec2(fi, uSeed));
     float ang = fi * 2.39996 + uSeed * 6.283;   // golden angle: even spread, no clumping
-    vec2 off = vec2(cos(ang), sin(ang) * 0.8) * (0.15 + 0.62 * h) * uSize;
-    float delay = fi * 0.07;                    // they burst outward in sequence
-    float t = clamp((uT - delay) / max(1.0 - delay, 0.25), 0.0, 1.0);
-    // MAX, not a sum: overlapping lobes must not stack into a solid white slab
-    cover = max(cover, puff(d0 - off, t, uSize * (0.42 + 0.48 * h), h * 9.0));
+    vec2 off = vec2(cos(ang), sin(ang) * 0.75) * (0.2 + 0.8 * h) * spread * uSize;
+    off.y += 0.15 * uT * uSize * h;             // the lighter ones rise faster
+    float t = clamp((uT - fi * 0.015) / 0.98, 0.0, 1.0);
+    // MAX, not a sum: overlapping lobes must not stack into a solid slab
+    dens = max(dens, lobe(d0 - off, t, uSize * (0.5 + 0.45 * h), h * 9.0));
   }
+  // A wide, faint haze on a slower clock: the thin gas still hanging in the
+  // air after the cloud itself has come apart.
+  dens = max(dens, lobe(d0, clamp(uT * 0.7, 0.0, 1.0), uSize * 1.7, uSeed * 4.0) * 0.45);
 
-  // A wide, faint haze on a slower clock, so gas is still hanging in the air
-  // after the burst itself has torn apart -- and a second, wider one slower
-  // still, the thin white air that drifts off last.
-  float haze = puff(d0, clamp(uT * 0.62, 0.0, 1.0), uSize * 1.6, uSeed * 4.0) * 0.55;
-  float air  = puff(d0, clamp(uT * 0.45, 0.0, 1.0), uSize * 2.3, uSeed * 7.0) * 0.30;
-
-  // Lobes are pushed past 1 before the clamp so their bodies are solid white
-  // rather than translucent, which is the difference between a cloud and a
-  // faint fog of overlapping circles.
-  float a = clamp(max(max(cover * 1.35, haze), air), 0.0, 1.0);
+  // Life. In fast; then eroded away thin parts first -- edges go, the dense
+  // core last -- and a final fade so it never cuts off.
+  float erode = smoothstep(0.35, 1.0, uT) * 0.85;
+  float a = smoothstep(erode, erode + 0.45, dens) * smoothstep(0.0, 0.06, uT);
+  // Never fully opaque: even the densest gas lets a little of what is behind
+  // it through, and a solid core reads as a light, not a cloud.
+  a *= (1.0 - smoothstep(0.8, 1.0, uT)) * uDensity * 0.9;
   if (a < 0.006) discard;
-  gl_FragColor = vec4(mix(vec3(0.86, 0.88, 0.92), vec3(1.0), cover * 0.95), a);
+
+  // Shading: lit from above, grey in the folds.
+  float lit = fbm(d0 * 4.5 / max(uSize, 1e-4) + uSeed + vec2(0.4, -uT * 0.8));
+  float up = clamp(d0.y / max(uSize, 1e-4) * 0.5 + 0.5, 0.0, 1.0);
+  vec3 grey = vec3(0.60, 0.62, 0.66), white = vec3(0.92, 0.93, 0.95);
+  vec3 col = mix(grey, white, clamp(0.15 + 0.55 * lit + 0.35 * up, 0.0, 1.0));
+  gl_FragColor = vec4(col, a);
 }`;
 
 /* ------------------------------------------------------------ the jutsu */
 
 const _v = new THREE.Vector3();
+const _uv = new THREE.Vector2();
 
 export class Substitution {
   constructor(stage, plate) {
@@ -232,17 +260,38 @@ export class Substitution {
     this.vanish.visible = false;
     stage.cloneScene.add(this.vanish);
 
-    this.smokeU = {
+    const smokeU = () => ({
       uT: { value: 0 }, uCenter: { value: new THREE.Vector2(0.5, 0.5) },
       uAspect: { value: 1.7 }, uSize: { value: 0.26 }, uSeed: { value: 0 },
-    };
-    this.smoke = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
-      vertexShader: VERT, fragmentShader: SMOKE_FRAG(PROFILE.smokeLobes), uniforms: this.smokeU,
+      uDensity: { value: 1 }, uPass: { value: 1 },
+    });
+    const smokeMesh = (uniforms) => new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
+      vertexShader: VERT, fragmentShader: SMOKE_FRAG(PROFILE.smokeLobes), uniforms,
       transparent: true, depthTest: false, depthWrite: false,
     }));
+    this.smokeU = smokeU();
+    this.smoke = smokeMesh(this.smokeU);
     this.smoke.renderOrder = 5;     // over the clones and the vanish quad
     this.smoke.visible = false;
     stage.cloneScene.add(this.smoke);
+
+    // Gas over the log. The burst lives in the screen-space pass UNDER the 3D
+    // scene, so the log draws on top of it; this second cloud sits in the 3D
+    // scene itself (its vertex shader ignores the camera, so it is still a
+    // screen quad) and is drawn last, so the log comes up through it and
+    // drags a trail of it down as it falls.
+    this.logSmokeU = smokeU();
+    this.logSmokeU.uDensity.value = 0.6;
+    this.logSmoke = smokeMesh(this.logSmokeU);
+    this.logSmoke.renderOrder = 50;
+    this.logSmoke.frustumCulled = false;
+    this.logSmoke.visible = false;
+    // The bloom pass captures this same scene into its own target; a quad of
+    // gas in that capture blooms into a white glare. The canvas is the only
+    // null target, so the shader draws nothing anywhere else.
+    this.logSmoke.onBeforeRender = (renderer) => { this.logSmokeU.uPass.value = renderer.getRenderTarget() ? 0 : 1; };
+    stage.scene.add(this.logSmoke);
+    this._gasUv = new THREE.Vector2();
 
     this.logRoot = new THREE.Group();
     this.logRoot.visible = false;
@@ -271,6 +320,10 @@ export class Substitution {
       this.logScaleUnit = 1 / Math.max(longest, 1e-3);
       this.logSpin = new THREE.Group();
       this.logSpin.add(model);
+      // Stood on end (checked against this model: a quarter turn about X puts
+      // its length vertical with the kunai facing the camera), with a slight
+      // lean so it reads as a solid object. Fixed: it does not tumble.
+      this.logSpin.rotation.set(Math.PI / 2, 0, 0.12);
       this.logRoot.add(this.logSpin);
 
       // lit, not additive: it is a solid wooden object, not an energy effect
@@ -335,6 +388,9 @@ export class Substitution {
     this.smokeU.uCenter.value.set(b.cx, 1 - b.cy);
     this.smokeU.uSize.value = THREE.MathUtils.clamp(b.h * 0.66, 0.28, 0.66);
     this.smokeU.uSeed.value = Math.random();
+    this.logSmokeU.uSeed.value = Math.random();
+    this.logSmokeU.uSize.value = this.smokeU.uSize.value * 0.42;
+    this._gasUv.set(b.cx, 1 - b.cy);
     this._fitRect(b, false);
     this._placeLog(b);
     return true;
@@ -349,9 +405,9 @@ export class Substitution {
     this._logX = (b.cx * 2 - 1) * tanHalf * cam.aspect * d;
     this._logBaseY = (1 - b.cy * 2) * tanHalf * d;
     this._logZ = -d;
-    // a log about two-thirds of the player's height on screen
+    // a log about half the player's height on screen; this one is stout
     const personCm = b.h * 2 * tanHalf * d;
-    this.logRoot.scale.setScalar(personCm * 0.62 * this.logScaleUnit);
+    this.logRoot.scale.setScalar(personCm * 0.52 * this.logScaleUnit);
   }
 
   update(dt) {
@@ -359,6 +415,7 @@ export class Substitution {
       this.vanishU.uAmount.value *= 0.8;
       this.vanish.visible = this.vanishU.uAmount.value > 0.01;
       this.smoke.visible = false;
+      this.logSmoke.visible = false;
       this.logRoot.visible = false;
       return;
     }
@@ -383,19 +440,41 @@ export class Substitution {
     this.smokeU.uAspect.value = aspect;
     this.vanishU.uAspect.value = aspect;
 
-    // --- the log: launches out of the burst, arcs up, drops below frame
+    // --- the log: pops up out of the burst, hangs a beat, drops straight down
     if (this.logReady && t >= T_LOG_IN && t < T_LOG_OUT) {
       const k = (t - T_LOG_IN) / (T_LOG_OUT - T_LOG_IN);
       this.logRoot.visible = true;
-      // simple ballistic arc: up fast, then away past the bottom edge
-      const u = k * 2 - 1;                       // -1 .. 1
-      const rise = (1 - u * u) * 26;             // peak mid-flight
-      const fall = Math.max(0, k - 0.45) * 190;  // then drops out of frame
-      this.logRoot.position.set(this._logX, this._logBaseY + rise - fall, this._logZ);
-      this.logSpin.rotation.z = k * 7.5;
-      this.logSpin.rotation.x = k * 2.2;
+      let y;
+      if (k < LOG_RISE_END) {
+        const u = k / LOG_RISE_END;
+        y = LOG_POP_CM * (1 - (1 - u) * (1 - u));                    // ease-out pop
+      } else if (k < LOG_HOLD_END) {
+        const u = (k - LOG_RISE_END) / (LOG_HOLD_END - LOG_RISE_END);
+        y = LOG_POP_CM + Math.sin(u * Math.PI) * 1.5;                 // the barest bob
+      } else {
+        const u = (k - LOG_HOLD_END) / (1 - LOG_HOLD_END);
+        y = LOG_POP_CM - LOG_DROP_CM * u * u;                          // gravity
+      }
+      this.logRoot.position.set(this._logX, this._logBaseY + y, this._logZ);
     } else {
       this.logRoot.visible = false;
+    }
+
+    // --- gas over the log: trails it, lags it, and hangs on after it is gone
+    const gasEnd = T_LOG_OUT + LOG_GAS_TAIL;
+    if (this.logReady && t >= T_LOG_IN && t < gasEnd) {
+      this.logSmoke.visible = true;
+      this.logSmokeU.uT.value = (t - T_LOG_IN) / (gasEnd - T_LOG_IN);
+      this.logSmokeU.uAspect.value = aspect;
+      if (this.logRoot.visible) {
+        _v.copy(this.logRoot.position).project(this.stage.camera);
+        // Follows with a lag, so as the log drops the gas is left hanging
+        // above it and stretches into a trail, rather than riding it down.
+        this._gasUv.lerp(_uv.set(_v.x * 0.5 + 0.5, _v.y * 0.5 + 0.5), 1 - Math.exp(-5 * dt));
+      }
+      this.logSmokeU.uCenter.value.copy(this._gasUv);
+    } else {
+      this.logSmoke.visible = false;
     }
 
     if (t >= T_END) { this.state = 'IDLE'; this.t = 0; }
@@ -405,7 +484,7 @@ export class Substitution {
   }
 
   dispose() {
-    for (const m of [this.vanish, this.smoke]) {
+    for (const m of [this.vanish, this.smoke, this.logSmoke]) {
       m.geometry.dispose(); m.material.dispose(); m.parent?.remove(m);
     }
     this.logRoot.parent?.remove(this.logRoot);

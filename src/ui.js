@@ -146,6 +146,8 @@ function bindSettings() {
   });
   $('btn-close-jutsu').addEventListener('click', () => { jutsu.hidden = true; });
 
+  $('mute-btn').addEventListener('click', () => handlers.muteToggled?.());
+
   const s = settings.get();
   $('opt-size').value = String(s.size);
   $('opt-debug').checked = s.debug;
@@ -173,4 +175,14 @@ export function fillDevices(devices, current) {
     sel.appendChild(o);
   });
   sel.value = current || '';
+}
+
+/** Reflect the mute state on its button. */
+export function setMuted(on) {
+  const b = $('mute-btn');
+  if (!b) return;
+  b.textContent = on ? '\u{1F507}' : '\u{1F50A}';
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  b.title = on ? 'Unmute sound' : 'Mute sound';
+  b.setAttribute('aria-label', b.title);
 }

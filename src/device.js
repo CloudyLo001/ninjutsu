@@ -31,7 +31,7 @@ export const PROFILE = IS_MOBILE
   : {
       cvWidth: 640,
       segInterval: 4,
-      segInterviewFast: 1,
+      segInterviewFast: 2,   // the mask shares the worker with hand tracking; 15 Hz keeps hands at full rate
       plateWidth: 1280,
       plateHeight: 720,
       maxPixelRatio: 2,

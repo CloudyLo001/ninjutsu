@@ -37,7 +37,7 @@ const REACH = 72.0;        // cm, how far the longest arcs throw
 const REF_PALM_CM = 9.0;
 
 const REGEN_MS = 32;       // how often the bolts are re-rolled
-const T_CHARGE = 0.22, T_OUT = 0.22;
+const T_CHARGE = 0.22, T_OUT = 0.12;
 
 const FOLLOW = 58;
 const PREDICT_MS = 45;

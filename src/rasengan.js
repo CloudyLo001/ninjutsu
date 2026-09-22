@@ -31,7 +31,7 @@ const FOLLOW_POS = 55;     // per-second exponential rate
 const FOLLOW_ROT = 30;
 const PREDICT_MS = 45;     // how far ahead to extrapolate between CV frames
 
-const T_FORM = 0.45, T_EXPAND = 0.28, T_DISSIPATE = 0.28;
+const T_FORM = 0.45, T_EXPAND = 0.28, T_DISSIPATE = 0.16;   // out is quick: the hand already closed
 
 // EMA weight per CV frame for the finger-joint offsets fed to the occluder.
 // Lateral noise is a couple of pixels; z noise is not, and at the ball's

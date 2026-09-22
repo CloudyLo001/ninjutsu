@@ -194,6 +194,29 @@ confidence -> the hand-depth occluder drawn in magenta. That last one is how to 
 occluder's capsules actually sit on your fingers in the video; it keeps writing depth, so what
 you see cut is what is really cut.
 
+## Sound
+
+Each jutsu has a sound (`src/audio.js`): the Rasenshuriken and Chidori play the two screams cut
+from `assets/audio/sasuke-naruto.mp3`, the clones play "Kage Bunshin no Jutsu!" (7.5-10 s of
+`assets/audio/kage-bunshin.mp3`), and the substitution plays a synthesised poof. Every cut is a
+`start`/`end` pair in `CUTS` at the top of `audio.js`, so re-cutting is two numbers. The mute
+button sits bottom right next to `?` and the setting persists.
+
+## Performance
+
+- **Hand tracking runs in a Web Worker** (`src/cvworker.js`) on its own WebGL context, so the
+  30-40 ms MediaPipe spends on a frame no longer blocks the render loop: the effects animate at
+  the display rate and the tracker runs as fast as the GPU allows. The debug overlay's `fps` line
+  shows the backend (`worker GPU` / `inline`) and the render divider.
+- **Sharing one GPU has a cost.** On integrated GPUs the two contexts starve each other. The render
+  loop halves its rate (`render /2` in the overlay) when inference slows past 80 ms; if it stays
+  starved anyway (median above 120 ms with an effect up) the app falls back to main-thread
+  inference at the next quiet moment and remembers that choice in `localStorage` (`rasen.cv`).
+  `?workercv` clears the memory and tries the worker again; `?inlinecv` forces the old
+  single-thread path.
+- Sign release is tuned to snap: two frames below the threshold, a fast-falling score, and a hand
+  lost while closing counts as closed after three frames (`snap` in `main.js`).
+
 ## Notes
 
 - **`#stage`'s `transform: scaleX(-1)` is the only mirror.** Frames fed to MediaPipe, landmarks and
