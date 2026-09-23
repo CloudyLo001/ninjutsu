@@ -189,8 +189,8 @@ export class CV {
     this.segmenter = await ImageSegmenter.createFromOptions(this._vision, {
       baseOptions: { modelAssetPath: SEG_URL, delegate: 'GPU' },
       runningMode: 'VIDEO',
-      outputCategoryMask: true,
-      outputConfidenceMasks: false,
+      outputCategoryMask: true,      // to identify the person plane, once
+      outputConfidenceMasks: true,   // the soft mask the compositor wants
     });
     return this.segmenter;
   }
@@ -321,7 +321,7 @@ export class CV {
     this.stats.handMs = m.handMs;
     this._countFrame();
     if (m.mask) {
-      this.mask = { data: m.mask.data, width: m.mask.width, height: m.mask.height,
+      this.mask = { data: m.mask.data, width: m.mask.width, height: m.mask.height, soft: !!m.mask.soft,
                     version: (this.mask?.version ?? 0) + 1 };
     }
     if (m.hands) {
@@ -367,15 +367,8 @@ export class CV {
     if (this.segWanted && this.segmenter && (this.segFrame++ % this.segEvery) === 0) {
       try {
         const seg = this.segmenter.segmentForVideo(this.small, this._nextTs());
-        const cat = seg?.categoryMask;
-        if (cat) {
-          this.mask = {
-            data: cat.getAsUint8Array(),
-            width: cat.width, height: cat.height,
-            version: (this.mask?.version ?? 0) + 1,
-          };
-          cat.close();
-        }
+        const m = softPersonMask(seg, this._segState || (this._segState = {}));
+        if (m) this.mask = { ...m, version: (this.mask?.version ?? 0) + 1 };
       } catch (err) {
         console.warn('[cv] segmentation failed', err);
       }
@@ -387,6 +380,53 @@ export class CV {
     });
     return true;
   }
+}
+
+
+/**
+ * The person as a SOFT mask, 0..255, from the segmenter's confidence output.
+ *
+ * The category mask is a hard 0/1 at a fifth of the video's resolution, and
+ * every one of its edges is a staircase once stretched over the frame. The
+ * confidence mask carries the model's actual belief at each texel, which the
+ * compositor can feather and upsample against the live frame. Which of the
+ * confidence planes is the person is settled once by correlating them with
+ * the category mask (person = category 0, as measured on a real frame).
+ */
+function softPersonMask(seg, state) {
+  const conf = seg?.confidenceMasks, cat = seg?.categoryMask;
+  if (!conf || !conf.length) {
+    if (!cat) return null;
+    const c = cat.getAsUint8Array();
+    const data = new Uint8Array(c.length);
+    for (let i = 0; i < c.length; i++) data[i] = c[i] ? 0 : 255;
+    const out = { data, width: cat.width, height: cat.height, soft: false };
+    cat.close();
+    return out;
+  }
+  let idx = state.personIdx;
+  if (idx == null || idx >= conf.length) {
+    idx = conf.length - 1;
+    if (conf.length > 1 && cat) {
+      const c = cat.getAsUint8Array();
+      let best = -Infinity;
+      for (let k = 0; k < conf.length; k++) {
+        const f = conf[k].getAsFloat32Array();
+        let inP = 0, nP = 0, inB = 0, nB = 0;
+        for (let i = 0; i < c.length; i += 7) { if (c[i] === 0) { inP += f[i]; nP++; } else { inB += f[i]; nB++; } }
+        const score = (nP ? inP / nP : 0) - (nB ? inB / nB : 0);
+        if (score > best) { best = score; idx = k; }
+      }
+    }
+    state.personIdx = idx;
+  }
+  const m = conf[idx], f = m.getAsFloat32Array();
+  const data = new Uint8Array(f.length);
+  for (let i = 0; i < f.length; i++) data[i] = (f[i] * 255 + 0.5) | 0;
+  const out = { data, width: m.width, height: m.height, soft: true };
+  for (const c of conf) c.close();
+  cat?.close();
+  return out;
 }
 
 /** MediaPipe's own handedness label per hand: 'Left', 'Right' or ''. */

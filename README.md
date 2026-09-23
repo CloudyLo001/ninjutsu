@@ -165,6 +165,22 @@ src/substitution.js  the log, the smoke, and the vanish
 src/ui.js        HUD, screens, settings
 ```
 
+## Invisibility
+
+The substitution paints a learned background plate over you. Four things make it hold up:
+
+- **Step out once.** The plate can only learn what it has seen, and wherever you have stood since the
+  camera opened it has never seen the wall. A prompt asks you to step out of frame for 2 s until it
+  has covered nearly everything; "Re-learn background" in settings asks again after moving the
+  camera. Everything else is a fallback for what it has still not seen.
+- **Soft mask, upsampled against the live frame.** The segmenter's confidence mask (not the hard
+  category mask) is temporally blended and then joint-bilateral upsampled in the vanish shader,
+  guided by the video, so the cut lands on the real silhouette rather than a staircase of texels.
+- **Exposure match.** The plate is scaled per channel to match the live background just outside the
+  mask, so auto-exposure drift does not leave a lighter or darker rectangle.
+- **Your shadow goes too.** Pixels much darker than the plate says the wall is, near you, are
+  counted as you.
+
 ## If the clones don't appear
 
 **Press `C`** to force them on. That separates the two failure modes, which look identical:

@@ -30,6 +30,7 @@ const app = {
   sfx: new Sfx(),
   offs: Array.from({ length: 21 }, () => new THREE.Vector3()), heldSide: null, debugView: 0,
   rearm: false,   // after a throw: the palm must close (or leave) before a new one can form
+  bgSeen: null, bgCoverage: 0, needCalib: true, calibShownAt: 0,   // background learning, see uploadMask
   renderDivider: 1, renderDividerLock: false,   // see renderLoop
 };
 
@@ -163,7 +164,7 @@ async function begin() {
   // winner-takes-all step in onFrame: the two seals share every scoring term
   // but the meet point, and near a meet of ~0.85 both are half-satisfied, so a
   // low bar here would otherwise fire on a high-crossed X.
-  app.ramSign = new SignTrigger({ onAt: 0.30, offAt: 0.18, onFrames: 2, lostFrames: 20 });
+  app.ramSign = new SignTrigger({ onAt: 0.42, offAt: 0.22, onFrames: 3, lostFrames: 20 });
 
   ui.initJutsuMenu({
     paper: app.palmSign.onAt,
@@ -180,6 +181,36 @@ async function begin() {
   ui.hideScreens();
 }
 
+/**
+ * The plate can only learn what it has seen, and wherever the player has
+ * stood since the camera opened it has never seen the wall. A single step out
+ * of frame fixes that better than any amount of inpainting, so the player is
+ * asked for one until the plate has covered nearly everything -- and can ask
+ * for it again from the settings after moving the camera.
+ */
+function updateCalibHint() {
+  if (!app.needCalib) return;
+  const now = performance.now();
+  if (app.bgCoverage >= 0.985) {
+    app.needCalib = false;
+    ui.setHint('Background learned');
+    setTimeout(() => ui.setHint(null), 1600);
+    return;
+  }
+  if (!app.calibShownAt) app.calibShownAt = now;
+  if (now - app.calibShownAt > 30000) { app.needCalib = false; ui.setHint(null); return; }   // not now, then
+  ui.setHint(`Step out of the frame for 2 s so it can learn the room \u00b7 ${Math.round(app.bgCoverage * 100)}%`);
+}
+
+/** Forget the room and ask for a step-out again (moved camera, new place). */
+function relearnBackground() {
+  app.plate?.reset();
+  app.bgSeen?.fill(0);
+  app.bgCoverage = 0;
+  app.needCalib = true;
+  app.calibShownAt = 0;
+}
+
 /** Lazily created; resized on the first real mask. */
 function ensureMaskTexture() {
   if (app.maskTex) return app.maskTex;
@@ -194,38 +225,48 @@ function uploadMask(mask) {
   if (!mask || mask.version === app.maskVersion) return;
   app.maskVersion = mask.version;
   const t = ensureMaskTexture();
-  // Selfie segmentation labels the BACKGROUND, not the person: measured on a
-  // real frame, background pixels come back 255 and the person 0. Inverted
-  // here so the shader's mask reads 1 inside the person, which is the
-  // intuitive direction and the opposite of the obvious guess.
+  // The mask arrives as the person's confidence, 0..255 (cv.js
+  // softPersonMask). The old hard category mask is still handled, inverted,
+  // in case a segmenter build only offers that.
   const n = mask.width * mask.height;
+  let fresh = false;
   if (!t.image.data || t.image.data.length !== n) {
     // dispose on a size change, or three keeps the old GPU allocation
     t.dispose();
     t.image = { data: new Uint8Array(n), width: mask.width, height: mask.height };
+    fresh = true;
   }
-  const dst = t.image.data, src = mask.data;
+  if (!app.bgSeen || app.bgSeen.length !== n) app.bgSeen = new Uint8Array(n);
+  const dst = t.image.data, src = mask.data, seen = app.bgSeen, soft = !!mask.soft;
 
   // Measure the person's bounding box in the same pass, for free: the clones
   // are placed from the player's real size and position in frame rather than a
-  // fixed offset, so they stand beside them however close they are.
+  // fixed offset, so they stand beside them however close they are. Also in
+  // the same pass: a temporal blend of the soft mask (its edges crawl frame to
+  // frame otherwise), and a count of how often each texel has been seen as
+  // background -- which is how much of the room the plate has really learned.
   const W = mask.width, H = mask.height;
-  let x0 = W, x1 = -1, y0 = H, y1 = -1;
+  let x0 = W, x1 = -1, y0 = H, y1 = -1, known = 0;
   for (let y = 0; y < H; y++) {
     const row = y * W;
     for (let x = 0; x < W; x++) {
-      const v = src[row + x] ? 0 : 255;
-      dst[row + x] = v;
-      if (v) {
+      const i = row + x;
+      let v = soft ? src[i] : (src[i] ? 0 : 255);
+      if (soft && !fresh) v = dst[i] + ((v - dst[i]) * 0.55 + 0.5 | 0);
+      dst[i] = v;
+      if (v > 127) {
         if (x < x0) x0 = x;
         if (x > x1) x1 = x;
         if (y < y0) y0 = y;
         if (y > y1) y1 = y;
-      }
+      } else if (v < 64 && seen[i] < 255) seen[i]++;
+      if (seen[i] >= 3) known++;
     }
   }
+  app.bgCoverage = known / n;
   t.needsUpdate = true;
   app.plate?.update(app.stage.videoTex, t);
+  updateCalibHint();
 
   if (x1 > x0 && y1 > y0) {
     app.bounds = {
@@ -544,7 +585,7 @@ ui.on('deviceChanged', async (deviceId) => {
   // A different camera is a different room -- different white balance, framing
   // and often resolution -- so everything the plate learned is now a
   // photograph of somewhere else, and its confidence would vouch for it.
-  app.plate?.reset();
+  relearnBackground();
   app.maskVersion = -1;            // the mask is stale too; force the next one through
   try {
     app.stream = await openCamera(deviceId);
@@ -563,6 +604,8 @@ ui.on('devicePicked', (deviceId) => {
 
 ui.on('settingsOpened', () => listCameras().then((d) => ui.fillDevices(d, settings.get().deviceId)));
 ui.on('muteToggled', () => settings.set({ muted: !settings.get().muted }));
+ui.on('relearn', () => relearnBackground());
+ui.on('hintDismissed', () => { app.needCalib = false; });
 ui.setMuted(settings.get().muted);
 
 settings.onChange((s, patch) => {
@@ -592,5 +635,5 @@ settings.onChange((s, patch) => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') app.cv?.resyncClock();
+  if (document.visibilityState === 'visible') { app.cv?.resyncClock(); app.sfx?.resume(); }
 });

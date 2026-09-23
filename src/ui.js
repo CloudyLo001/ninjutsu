@@ -147,6 +147,8 @@ function bindSettings() {
   $('btn-close-jutsu').addEventListener('click', () => { jutsu.hidden = true; });
 
   $('mute-btn').addEventListener('click', () => handlers.muteToggled?.());
+  $('btn-relearn').addEventListener('click', () => { handlers.relearn?.(); panel.hidden = true; });
+  $('hint').addEventListener('click', () => { setHint(null); handlers.hintDismissed?.(); });
 
   const s = settings.get();
   $('opt-size').value = String(s.size);
@@ -189,4 +191,13 @@ export function setMuted(on) {
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
   b.title = on ? 'Unmute sound' : 'Mute sound';
   b.setAttribute('aria-label', b.title);
+}
+
+/** A one-line prompt at the top of the stage; null hides it. */
+export function setHint(text) {
+  const h = $('hint');
+  if (!h) return;
+  if (!text) { h.hidden = true; return; }
+  if (h.textContent !== text) h.textContent = text;
+  h.hidden = false;
 }

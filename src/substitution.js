@@ -56,51 +56,83 @@ void main() {
 }`;
 
 // Paints the background plate over the person.
+//
+// Three things make this read as the room and not as a patch of the room:
+//   the mask edge is upsampled AGAINST THE LIVE FRAME (joint bilateral), so
+//     it lands on the real silhouette rather than on a staircase of segmenter
+//     texels;
+//   the plate is exposure-matched to the frame from the ring of background
+//     just outside the mask, so a camera whose gain has drifted since the
+//     plate was learned does not leave a lighter or darker rectangle;
+//   the player's shadow -- which the segmenter does not count as them -- is
+//     found as "much darker than the plate says" and painted over too.
 const VANISH_FRAG = /* glsl */`
 precision highp float;
 uniform sampler2D uPlate;
 uniform sampler2D uMask;
+uniform sampler2D uVideo;
+uniform vec2  uMaskTexel;    // one mask texel, in uv
 uniform float uAmount;       // 0 = visible, 1 = gone
 uniform float uMaskFlipY;
 uniform float uPlateFlipY;
 uniform float uAspect;       // frame w/h, to keep the kernels round in pixels
 varying vec2 vScreenUv;
 
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+// Joint-bilateral upsample of the mask, guided by the live frame. The mask is
+// a fifth of the video's resolution and a plain stretch puts its edge
+// somewhere near the real one; weighting each mask tap by how much the video
+// there resembles the video HERE snaps the edge onto the real silhouette --
+// hair, a sleeve, a finger -- with no model change at all.
+float maskAt(vec2 uv, vec2 muv, float flipM) {
+  float yc = luma(texture2D(uVideo, uv).rgb);
+  float m = 0.0, w = 0.0;
+  for (int i = -2; i <= 2; i++) {
+    for (int j = -2; j <= 2; j++) {
+      vec2 o = vec2(float(i), float(j)) * uMaskTexel;
+      float mi = texture2D(uMask, muv + o).r;
+      float yi = luma(texture2D(uVideo, uv + vec2(o.x, o.y * flipM)).rgb);
+      float ws = exp(-float(i * i + j * j) / 4.5);
+      float dy = yc - yi;
+      float wr = exp(-dy * dy / 0.012) + 0.03;
+      m += mi * ws * wr;
+      w += ws * wr;
+    }
+  }
+  return m / w;
+}
+
 // Confidence-weighted average of the plate over a ring of taps: what the room
-// looks like AROUND here, according only to pixels the plate is sure of.
-void ring(vec2 uv, vec2 r, float wr, inout vec3 sum, inout float wsum) {
+// looks like AROUND here, according only to pixels the plate is sure of. The
+// inner rings also gather live-vs-plate pairs on background texels, for the
+// exposure match.
+void ring(vec2 puv, vec2 uv, vec2 muv, float flipM, vec2 r, float wr, bool local,
+          inout vec3 sum, inout float wsum, inout vec3 sv, inout vec3 sp, inout float wg) {
   for (int i = 0; i < 8; i++) {
     float t = float(i) * 0.7853982;            // 45 degree steps
-    vec4 s = texture2D(uPlate, uv + vec2(cos(t), sin(t)) * r);
+    vec2 off = vec2(cos(t), sin(t)) * r;
+    vec4 s = texture2D(uPlate, puv + off);
     float w = s.a * s.a * wr;                  // squared: half-known counts for little
     sum += s.rgb * w;
     wsum += w;
+    if (local) {
+      float mt = texture2D(uMask, muv + vec2(off.x, off.y * flipM)).r;
+      float bgw = s.a * (1.0 - smoothstep(0.2, 0.5, mt));
+      sv += texture2D(uVideo, uv + off).rgb * bgw;
+      sp += s.rgb * bgw;
+      wg += bgw;
+    }
   }
 }
 
 void main() {
   vec2 uv = vScreenUv;
   vec2 muv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, uMaskFlipY));
-
-  // Dilate a little, feather a lot. The segmenter's silhouette sits a touch
-  // inside the real one -- hair, a shoulder, a sleeve's edge -- and every pixel
-  // of person it leaves out is a dark contour against the wall, so the plate is
-  // painted past the mask's edge. But the feather has to be WIDE, and that
-  // means a wide kernel with the threshold in its middle: put the threshold
-  // near zero and alpha saturates the moment any tap touches the mask, which
-  // moves the cut to the kernel's own boundary and gives a hard, stepped edge.
-  float m = 0.0;
-  vec2 spread = vec2(0.009, 0.009 * uAspect);
-  for (int i = -2; i <= 2; i++) {
-    for (int j = -2; j <= 2; j++) {
-      m += texture2D(uMask, muv + vec2(float(i), float(j)) * spread).r;
-    }
-  }
-  m /= 25.0;
-  float a = smoothstep(0.10, 0.55, m) * uAmount;
-  if (a < 0.01) discard;
-
+  float flipM = mix(1.0, -1.0, uMaskFlipY);
   vec2 puv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, uPlateFlipY));
+
+  float m = maskAt(uv, muv, flipM);
   vec4 sharp = texture2D(uPlate, puv);
   float conf = sharp.a;
 
@@ -109,20 +141,36 @@ void main() {
   // silhouette -- what it holds is a photograph of THEM, and blurring that
   // only makes a ghost. Fill from the room around them instead: a wide,
   // confidence-weighted average that ignores every pixel the plate is unsure
-  // of. On a wall that is the wall; on anything, it is at least not a person.
-  // Nearer rings weigh far more, so the fill follows the LOCAL surroundings --
-  // a wall's gradient, the edge of a shadow -- rather than averaging the whole
-  // room into one flat grey that reads as a cut-out.
-  vec3 sum = vec3(0.0);
-  float wsum = 0.0;
-  ring(puv, vec2(0.06, 0.06 * uAspect), 1.00, sum, wsum);
-  ring(puv, vec2(0.13, 0.13 * uAspect), 0.35, sum, wsum);
-  ring(puv, vec2(0.24, 0.24 * uAspect), 0.12, sum, wsum);
-  ring(puv, vec2(0.40, 0.40 * uAspect), 0.04, sum, wsum);
+  // of. Nearer rings weigh far more, so the fill follows the LOCAL
+  // surroundings rather than averaging the whole room into one flat grey.
+  vec3 sum = vec3(0.0), sv = vec3(0.0), sp = vec3(0.0);
+  float wsum = 0.0, wg = 0.0;
+  ring(puv, uv, muv, flipM, vec2(0.06, 0.06 * uAspect), 1.00, true,  sum, wsum, sv, sp, wg);
+  ring(puv, uv, muv, flipM, vec2(0.13, 0.13 * uAspect), 0.35, true,  sum, wsum, sv, sp, wg);
+  ring(puv, uv, muv, flipM, vec2(0.24, 0.24 * uAspect), 0.12, false, sum, wsum, sv, sp, wg);
+  ring(puv, uv, muv, flipM, vec2(0.40, 0.40 * uAspect), 0.04, false, sum, wsum, sv, sp, wg);
+
+  // Exposure match: how the live frame relates to the plate on the background
+  // right next to here, per channel. Clamped, so a genuinely changed room
+  // cannot be "matched" into a smear.
+  vec3 gain = wg > 0.05 ? clamp(sv / max(sp, vec3(0.02)), 0.6, 1.6) : vec3(1.0);
+
+  // The shadow: live much darker than the (matched) plate says this wall is,
+  // where the plate is sure of the wall. Counted as part of the player.
+  vec3 live = texture2D(uVideo, uv).rgb;
+  float yv = luma(live), yp = luma(sharp.rgb * gain);
+  float shade = smoothstep(0.90, 0.68, yv / max(yp, 0.02)) * smoothstep(0.3, 0.7, conf);
+  m = max(m, shade * 0.9);
+
+  // Dilate a little (the threshold sits low), feather a little: with the edge
+  // now on the real silhouette, a wide feather only shows skin through it.
+  float a = smoothstep(0.18, 0.55, m) * uAmount;
+  if (a < 0.01) discard;
+
   vec3 fill = wsum > 0.01 ? sum / wsum : sharp.rgb;
   // Half-known is known enough: a pixel the plate has a handful of samples for
   // is real background, and the fill is only for what it has never seen.
-  vec3 col = mix(fill, sharp.rgb, smoothstep(0.15, 0.60, conf));
+  vec3 col = mix(fill, sharp.rgb, smoothstep(0.15, 0.60, conf)) * gain;
 
   gl_FragColor = vec4(col, a);
 }`;
@@ -251,6 +299,8 @@ export class Substitution {
       uPlateFlipY: { value: 0 },
       uAspect: { value: 1.7 },
       uRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uVideo: { value: stage.videoTex },
+      uMaskTexel: { value: new THREE.Vector2(1 / 256, 1 / 144) },
     };
     this.vanish = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({
       vertexShader: RECT_VERT, fragmentShader: VANISH_FRAG, uniforms: this.vanishU,
@@ -361,7 +411,7 @@ export class Substitution {
    * would clip the painted region into a hard-edged rectangle.
    */
   _fitRect(b, grow) {
-    const M = 0.14;                      // margin, wide enough for the soft edge
+    const M = 0.20;                      // margin: the soft edge, and the shadow on the wall beside them
     // bounds y is measured top-down off the mask; screen uv runs bottom-up.
     const cy = 1 - b.cy;
     let x0 = b.cx - b.w / 2 - M, x1 = b.cx + b.w / 2 + M;
@@ -430,6 +480,8 @@ export class Substitution {
     else hide = Math.max(0, 1 - (t - T_RETURN) / (T_END - T_RETURN));
     this.vanishU.uAmount.value = hide;
     this.vanishU.uPlate.value = this.plate.texture;
+    const mi = this.vanishU.uMask.value?.image;
+    if (mi?.width) this.vanishU.uMaskTexel.value.set(1 / mi.width, 1 / mi.height);
     this.vanish.visible = hide > 0.01 && !!this.vanishU.uMask.value;
 
     // --- smoke burst

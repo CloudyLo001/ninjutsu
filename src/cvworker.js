@@ -36,6 +36,7 @@ let segmenter = null;
 let lastTs = -1;
 let recovering = false;
 let delegate = '';       // which delegate the hand task ended up on, for the overlay
+const segState = {};     // which confidence plane is the person
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 
@@ -70,8 +71,8 @@ async function makeSegmenter() {
       return await mp.ImageSegmenter.createFromOptions(vision, {
         baseOptions: { modelAssetPath: SEG_URL, delegate },
         runningMode: 'VIDEO',
-        outputCategoryMask: true,
-        outputConfidenceMasks: false,
+        outputCategoryMask: true,      // to identify the person plane, once
+        outputConfidenceMasks: true,   // the soft mask the compositor wants
       });
     } catch (err) {
       if (delegate === 'CPU') throw err;
@@ -126,13 +127,8 @@ function frame(bitmap, wantSeg) {
     if (wantSeg && segmenter) {
       try {
         const seg = segmenter.segmentForVideo(bitmap, nextTs());
-        const cat = seg?.categoryMask;
-        if (cat) {
-          const data = cat.getAsUint8Array();
-          mask = { data, width: cat.width, height: cat.height };
-          transfer.push(data.buffer);
-          cat.close();
-        }
+        mask = softPersonMask(seg, segState);
+        if (mask) transfer.push(mask.data.buffer);
       } catch (err) {
         console.warn('[cvworker] segmentation failed', err);
       }
@@ -144,6 +140,53 @@ function frame(bitmap, wantSeg) {
     try { bitmap.close(); } catch { /* already closed */ }
   }
   post({ type: 'result', hands: res, mask, handMs }, transfer);
+}
+
+
+/**
+ * The person as a SOFT mask, 0..255, from the segmenter's confidence output.
+ *
+ * The category mask is a hard 0/1 at a fifth of the video's resolution, and
+ * every one of its edges is a staircase once stretched over the frame. The
+ * confidence mask carries the model's actual belief at each texel, which the
+ * compositor can feather and upsample against the live frame. Which of the
+ * confidence planes is the person is settled once by correlating them with
+ * the category mask (person = category 0, as measured on a real frame).
+ */
+function softPersonMask(seg, state) {
+  const conf = seg?.confidenceMasks, cat = seg?.categoryMask;
+  if (!conf || !conf.length) {
+    if (!cat) return null;
+    const c = cat.getAsUint8Array();
+    const data = new Uint8Array(c.length);
+    for (let i = 0; i < c.length; i++) data[i] = c[i] ? 0 : 255;
+    const out = { data, width: cat.width, height: cat.height, soft: false };
+    cat.close();
+    return out;
+  }
+  let idx = state.personIdx;
+  if (idx == null || idx >= conf.length) {
+    idx = conf.length - 1;
+    if (conf.length > 1 && cat) {
+      const c = cat.getAsUint8Array();
+      let best = -Infinity;
+      for (let k = 0; k < conf.length; k++) {
+        const f = conf[k].getAsFloat32Array();
+        let inP = 0, nP = 0, inB = 0, nB = 0;
+        for (let i = 0; i < c.length; i += 7) { if (c[i] === 0) { inP += f[i]; nP++; } else { inB += f[i]; nB++; } }
+        const score = (nP ? inP / nP : 0) - (nB ? inB / nB : 0);
+        if (score > best) { best = score; idx = k; }
+      }
+    }
+    state.personIdx = idx;
+  }
+  const m = conf[idx], f = m.getAsFloat32Array();
+  const data = new Uint8Array(f.length);
+  for (let i = 0; i < f.length; i++) data[i] = (f[i] * 255 + 0.5) | 0;
+  const out = { data, width: m.width, height: m.height, soft: true };
+  for (const c of conf) c.close();
+  cat?.close();
+  return out;
 }
 
 self.onmessage = async (e) => {

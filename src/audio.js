@@ -75,8 +75,35 @@ export class Sfx {
       this.crackleGate = this._gateBuffer();
     }
     if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    this._unmuteIOS();
     if (!this._loading) this._loading = this._load();
     return true;
+  }
+
+  /**
+   * iOS routes Web Audio through the "ambient" audio session, which the
+   * ring/silent switch (and Control Centre's mute) silences outright -- the
+   * context runs, the analyser sees signal, and the speaker stays quiet. A
+   * playing <audio> element moves the session to "playback", which the
+   * switch does not touch, and Web Audio comes with it. So a looping sliver
+   * of silence is started inside the same tap. Harmless everywhere else.
+   */
+  _unmuteIOS() {
+    if (this._keepAlive) { this._keepAlive.play().catch(() => {}); return; }
+    try {
+      const sr = 8000, n = sr / 10;                  // 0.1 s of 8-bit mono silence
+      const buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+      const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+      str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVE'); str(12, 'fmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+      v.setUint32(24, sr, true); v.setUint32(28, sr, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+      str(36, 'data'); v.setUint32(40, n, true);
+      for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+      const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+      a.loop = true; a.volume = 0.01; a.setAttribute('playsinline', '');
+      a.play().catch(() => {});
+      this._keepAlive = a;
+    } catch { /* no media element support: nothing to do */ }
   }
 
   async _load() {
@@ -89,6 +116,12 @@ export class Sfx {
         console.warn('[sfx] clip unavailable', key, err);
       }
     }));
+  }
+
+  /** iOS suspends the context when the tab goes away; wake it on return. */
+  resume() {
+    if (this.ctx?.state === 'suspended') this.ctx.resume().catch(() => {});
+    this._keepAlive?.play().catch(() => {});
   }
 
   setMuted(on) {

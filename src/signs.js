@@ -229,9 +229,16 @@ export function ramScore(worldHands, imageHands, dbg) {
   const up1 = (imageHands[1][5].y - imageHands[1][8].y);
   const upward = clamp01((up0 + up1) / 2 / 0.04) * 0.6 + 0.4;
 
-  const score = clamp01(shape * converging * angleOk * upward);
+  // And the hands are TOGETHER. A steeple is two hands pressed against each
+  // other; one hand raised while the other rests anywhere else in the frame
+  // can score on shape and direction alone, and did. Measured between the
+  // index knuckles, in frame widths.
+  const gap = Math.hypot(imageHands[0][5].x - imageHands[1][5].x, imageHands[0][5].y - imageHands[1][5].y);
+  const near = 1 - smooth01(gap, 0.16, 0.30);
+
+  const score = clamp01(shape * converging * angleOk * upward * near);
   if (dbg) {
-    dbg.angDeg = angDeg; dbg.angleOk = angleOk; dbg.ratio = cr.ratio;
+    dbg.angDeg = angDeg; dbg.angleOk = angleOk; dbg.ratio = cr.ratio; dbg.gap = gap; dbg.near = near;
     dbg.meet = meet; dbg.converging = converging; dbg.upward = upward; dbg.score = score;
   }
   return score;
