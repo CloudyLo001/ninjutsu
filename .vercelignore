@@ -1,0 +1,7 @@
+.claude/
+.env*
+.github/
+.vercel/
+README.md
+assets/generated/
+serve.py

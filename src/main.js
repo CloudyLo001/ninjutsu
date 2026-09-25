@@ -127,21 +127,26 @@ async function begin() {
   const plateH = Math.round(plateW * (video.videoHeight || 9) / (video.videoWidth || 16));
   app.plate = new BackgroundPlate(app.stage.renderer, plateW, plateH);
   app.subst = new Substitution(app.stage, app.plate);
-  app.subst.loadLog();
+  const logLoad = app.subst.loadLog();
 
-  // Segmentation is the most expensive model here and is only needed for
-  // clones, so it loads in the background after the app is already usable.
-  app.cv.ensureSegmenter()
-    .then(() => {
-      const tex = ensureMaskTexture();
-      app.clones.attachMask(tex);
-      app.subst.setMaskTexture(tex);
-      // From here the segmenter ticks at a low rate all the time, so the
-      // background plate is already filled in when the ram seal is made --
-      // there is no way to know in advance when that will be.
-      app.cv.setSegmentInterval(PROFILE.segInterval);
-    })
-    .catch((err) => console.warn('[main] segmentation unavailable; clones disabled', err));
+  // Segmentation used to load in the background after the app was already
+  // usable, and every other slow thing -- shader compiles, the tracker's
+  // first frames, the log model, the audio -- happened during the first
+  // seconds of play. On a phone that read as a game that starts broken. All
+  // of it now happens here, behind the progress bar (warmUp below).
+  ui.setLoading(0.80, 'Loading the segmenter…');
+  try {
+    await app.cv.ensureSegmenter();
+    const tex = ensureMaskTexture();
+    app.clones.attachMask(tex);
+    app.subst.setMaskTexture(tex);
+    // From here the segmenter ticks at a low rate all the time, so the
+    // background plate is already filled in when the ram seal is made --
+    // there is no way to know in advance when that will be.
+    app.cv.setSegmentInterval(PROFILE.segInterval);
+  } catch (err) {
+    console.warn('[main] segmentation unavailable; clones disabled', err);
+  }
 
   // The sign is MADE with an open palm but HELD with a cupped one. openness()
   // on a cupped hand is 0.25-0.4 and on a fist ~0, so an off threshold of 0.12
@@ -173,12 +178,80 @@ async function begin() {
     ram: app.ramSign.onAt,
   });
 
+  await warmUp(video, logLoad);
   ui.setLoading(1, 'Ready');
+  listCameras().then((d) => ui.fillDevices(d, settings.get().deviceId));
+  ui.hideScreens();
+}
+
+/**
+ * Do the slow things now, not during play.
+ *
+ * The first inference on each model compiles its GPU shaders (seconds on a
+ * phone); three.js compiles an effect's materials the first time it is drawn;
+ * the log GLB and the audio stream in. Each of those used to land as a
+ * multi-second freeze the first time a jutsu was made. Here they run behind
+ * the progress bar, and the loop is then watched until the tracker is
+ * actually delivering frames at a playable rate before the screen lifts.
+ */
+async function warmUp(video, logLoad) {
+  ui.setLoading(0.85, 'Loading the substitution log…');
+  await Promise.race([logLoad, new Promise((r) => setTimeout(r, 6000))]);
+
+  ui.setLoading(0.88, 'Compiling the effects…');
+  warmShaders();
+
+  ui.setLoading(0.91, 'Warming up the tracker (slow the first time)…');
+  app.cv.wantSegmentation(true);
+  app.cv.setSegmentInterval(1);
+  for (let i = 0; i < 6; i++) await app.cv.tickOnce(video);
+  app.cv.setSegmentInterval(PROFILE.segInterval);
+  await app.sfx._loading;
+
+  // Run the real loop behind the loading screen until it is up to speed.
+  ui.setLoading(0.95, 'Checking speed…');
   app.cv.start(video, onFrame);
   app.running = true;
   requestAnimationFrame(renderLoop);
-  listCameras().then((d) => ui.fillDevices(d, settings.get().deviceId));
-  ui.hideScreens();
+  let t0 = performance.now(), fps = 0, switched = false;
+  const tStart = t0;
+  while (performance.now() - t0 < 5000 && performance.now() - tStart < 20000) {
+    await new Promise((r) => setTimeout(r, 250));
+    // A hidden tab gets no camera frames at all; that is not slowness, and
+    // must not be remembered as such.
+    if (document.visibilityState !== 'visible') { t0 = performance.now(); continue; }
+    fps = app.cv.stats.fps;
+    ui.setLoading(0.95 + 0.05 * Math.min(1, (performance.now() - t0) / 5000), `Checking speed… ${fps} fps`);
+    if (fps >= 8 && performance.now() - t0 > 1200) break;
+    // The worker is being starved by this GPU (seen on an integrated one:
+    // 6 results/s). Do not make the player discover that in the first
+    // seconds of play -- switch to main-thread tracking now, remember it
+    // for next time (switchToInline does), and check again.
+    if (!switched && fps < 8 && app.cv.stats.backend === 'worker' && performance.now() - t0 > 2500) {
+      switched = true;
+      ui.setLoading(0.97, 'Tracker is slow here; switching mode…');
+      await app.cv.switchToInline(`${fps} fps at start`);
+      app.renderDivider = 1;
+      t0 = performance.now();
+    }
+  }
+  if (fps < 8) console.warn(`[main] tracker only reached ${fps} fps during warm-up`);
+}
+
+/** Compile every material once, off-screen, so no first use stutters. */
+function warmShaders() {
+  const st = app.stage, r = st.renderer;
+  const saved = [];
+  for (const sc of [st.scene, st.cloneScene]) sc.traverse((o) => { saved.push([o, o.visible]); o.visible = true; });
+  try {
+    r.compile(st.scene, st.camera);
+    r.compile(st.cloneScene, st.bgCamera);
+    r.compile(st.bgScene, st.bgCamera);
+    st.bloom?.build(st.scene, st.camera);
+  } catch (err) {
+    console.warn('[main] shader warm-up failed', err);
+  }
+  for (const [o, v] of saved) o.visible = v;
 }
 
 /**

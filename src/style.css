@@ -207,6 +207,7 @@ input[type=range] { cursor: pointer; }
 .screen h2 { margin: 0; font-size: 20px; letter-spacing: .12em; text-transform: uppercase; }
 .screen p  { margin: 0; max-width: 460px; font-size: 14px; line-height: 1.6; color: #dde6f5; }
 .screen p.fine { color: var(--dim); font-size: 11.5px; }
+.screen p.fine.tip { color: var(--paper); opacity: .85; margin-top: 10px; }
 
 .bar {
   width: min(420px, 74vw); height: 5px;
