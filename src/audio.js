@@ -56,7 +56,7 @@ export class Sfx {
     this.ctx = null;
     this.buffers = {};
     this.muted = false;
-    this.mode = 'special';
+    this.mode = 'normal';
     this.master = null;
     this._loading = null;
     this._playing = new Map();   // one voice per jutsu: a retrigger restarts it
@@ -134,7 +134,7 @@ export class Sfx {
 
   /** 'normal' | 'special'. Takes effect on the next jutsu; running ones finish. */
   setMode(mode) {
-    this.mode = MODES[mode] ? mode : 'special';
+    this.mode = MODES[mode] ? mode : 'normal';
   }
 
   /** Play a jutsu's sound in the current mode. Retriggering restarts it. */

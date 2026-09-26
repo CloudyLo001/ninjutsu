@@ -16,21 +16,21 @@ const LEGACY_KEY = 'rasen.settings.v1';
 const LEGACY_KEEP = ['size', 'deviceId', 'debug', 'rasenganHand'];
 
 export const DEFAULTS = {
-  size: 0.5,          // effect scale multiplier (the slider); half size by default
+  size: 0.8,          // effect scale multiplier (the slider)
   alongPalm: 0.85,    // where on the hand it sits: 0 = wrist, 1 = knuckle line
   hoverCm: 5.0,       // gap between the palm skin and the underside of the ball
   occlude: true,      // fingers in front of the ball hide it (hand-depth proxy)
   fingerBiasCm: 1.5,  // forward push at the fingertips, to cover MediaPipe under-reporting a curl
   fingerRadiusCm: 1.1, // occluder finger radius at a 9 cm palm; scales with the hand
   rasenganHand: 'right',   // 'right' | 'left' | 'any' -- which hand forms it
-  chidoriSize: 0.5,   // how far the lightning throws, 0.5 .. 2; matches `size`
+  chidoriSize: 0.8,   // how far the lightning throws, 0.5 .. 2; matches `size`
   glow: 0.9,          // glow intensity; past ~1.5 it saturates to white
   bladeWhite: 0.45,   // how white-hot the shuriken blades burn, 0..1.5
   deviceId: null,     // camera deviceId, null = browser default
   debug: false,
   muted: false,       // jutsu sound effects off
   throwEnabled: true, // a whip of the hand throws the Rasenshuriken
-  soundMode: 'special', // 'normal' (effects) | 'special' (the anime screams)
+  soundMode: 'normal',  // 'normal' (effects) | 'special' (the anime screams)
 };
 
 const listeners = new Set();
